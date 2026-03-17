@@ -32,8 +32,29 @@ def load_fvc_dataset(base_path):
     logging.info(f"Loaded {len(image_paths)} images from dataset.")
     return image_paths
 
+def get_roi_mask(image):
+    """
+    Generates a binary Region of Interest (ROI) mask to segment the 
+    fingerprint from the background noise.
+    """
+    # 1. Blur heavily to merge the ridges together
+    blur = cv2.GaussianBlur(image, (11, 11), 0)
+    
+    # 2. Threshold to get the general foreground
+    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # 3. Morphological operations to create a solid blob (close holes, open noise)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    
+    # 4. Erode the mask to trim away the noisy outer boundary of the print
+    mask = cv2.erode(mask, kernel, iterations=1)
+    
+    return mask
+
 def preprocess_and_thin(image_path, save_debug=False, debug_dir="./debug"):
-    """Phase 1.1: Image enhancement, margin clearing, and morphological thinning."""
+    """Phase 1.1: Enhancement, ROI Masking, and Morphological thinning."""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return None
@@ -42,13 +63,16 @@ def preprocess_and_thin(image_path, save_debug=False, debug_dir="./debug"):
     enhanced = clahe.apply(img)
     _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
-    # --- NEW: Clear the borders to prevent the bounding box artifact ---
+    # Apply the ROI Mask to clear background noise
+    roi_mask = get_roi_mask(img)
+    binary = cv2.bitwise_and(binary, binary, mask=roi_mask)
+    
+    # Clear the borders just in case the ROI touches the edge
     margin = 15
-    binary[:margin, :] = 0        # Top edge
-    binary[-margin:, :] = 0       # Bottom edge
-    binary[:, :margin] = 0        # Left edge
-    binary[:, -margin:] = 0       # Right edge
-    # -------------------------------------------------------------------
+    binary[:margin, :] = 0        
+    binary[-margin:, :] = 0       
+    binary[:, :margin] = 0        
+    binary[:, -margin:] = 0       
     
     binary_bool = binary > 0
     skeleton = skeletonize(binary_bool)
@@ -56,7 +80,8 @@ def preprocess_and_thin(image_path, save_debug=False, debug_dir="./debug"):
     if save_debug:
         os.makedirs(debug_dir, exist_ok=True)
         plt.imsave(os.path.join(debug_dir, "1_original.png"), img, cmap='gray')
-        plt.imsave(os.path.join(debug_dir, "2_skeleton.png"), skeleton, cmap='gray')
+        plt.imsave(os.path.join(debug_dir, "2_roi_mask.png"), roi_mask, cmap='gray')
+        plt.imsave(os.path.join(debug_dir, "3_skeleton.png"), skeleton, cmap='gray')
         
     return skeleton
 
@@ -90,7 +115,7 @@ def filter_minutiae(minutiae, image_shape, border_dist=20, min_dist=10):
             y > border_dist and y < rows - border_dist):
             filtered.append((x, y))
             
-    # 2. Greedy Distance Filtering (Fixes the annihilation bug)
+    # 2. Greedy Distance Filtering
     final_minutiae = []
     for p in filtered:
         is_too_close = False
@@ -100,7 +125,6 @@ def filter_minutiae(minutiae, image_shape, border_dist=20, min_dist=10):
                 is_too_close = True
                 break
         
-        # Only add the point if it isn't too close to one we've already saved
         if not is_too_close:
             final_minutiae.append(p)
             
@@ -125,8 +149,8 @@ def build_delaunay_graph(minutiae, save_debug=False, debug_dir="./debug"):
         plt.triplot(points[:, 0], points[:, 1], tri.simplices.copy())
         plt.plot(points[:, 0], points[:, 1], 'ro', markersize=3)
         plt.gca().invert_yaxis()
-        plt.title("Filtered Minutiae & Delaunay Topology")
-        plt.savefig(os.path.join(debug_dir, "3_delaunay.png"))
+        plt.title(f"Filtered Minutiae ({len(points)}) & Delaunay Topology")
+        plt.savefig(os.path.join(debug_dir, "4_delaunay.png"))
         plt.close()
         
     return list(edges)
@@ -203,7 +227,7 @@ def build_database_index(dataset_paths):
     tree = KDTree(X, metric='euclidean')
     return tree, X, np.array(descriptor_labels)
 
-def match_fingerprint_query(query_path, kd_tree, database_labels, max_l2_distance=0.5):
+def match_fingerprint_query(query_path, kd_tree, database_labels, max_l2_distance=0.4):
     """Phase 4.2: Matches query image against index with strict FRR/FAR thresholding."""
     skeleton = preprocess_and_thin(query_path)
     if skeleton is None: return None
@@ -252,7 +276,7 @@ def main():
     correct_matches = 0
     total_queries = len(query_set)
     
-    # Optional: adjust max_l2_distance to tune the FAR vs FRR tradeoff
+    # Distance threshold for matching - can be tuned!
     distance_threshold = 0.4 
     
     for q_path, true_id in query_set:
