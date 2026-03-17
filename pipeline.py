@@ -16,6 +16,9 @@ v2 Fixes (applied after real-data diagnosis):
                                      global Laplacian spectrum + ridge-count histogram
                                      + degree distribution + node-descriptor percentiles.
 
+v4 KEY FIX: orientation normalization (rotate to canonical frame) makes
+    all spatial block-features rotation-invariant across impressions.
+
 Pipeline Phases:
     Phase 1.1  →  Preprocessing & Minutiae Extraction
                   (Gabor/CLAHE enhancement → adaptive binarise → Skeletonise → CN method)
@@ -443,6 +446,110 @@ def extract_minutiae(skeleton: np.ndarray) -> tuple:
     return np.array(all_coords, dtype=int), np.array(all_types)
 
 
+def compute_reference_angle(gray: np.ndarray, mask: np.ndarray) -> float:
+    """
+    Estimate the dominant ridge orientation in the fingerprint central region
+    using the gradient structure tensor.
+
+    WHY: The orientation field blocks are fixed to pixel coordinates.
+    If two impressions of the same finger are presented at different angles
+    (even 5-10°), their orientation field vectors will differ strongly, making
+    cosine similarity LOWER for same-subject pairs than for some cross-subject pairs
+    (the inversion observed in v3). This function measures how much rotation is
+    needed to bring the fingerprint to a canonical upright orientation.
+
+    Method (structure tensor):
+        Compute Gx, Gy over the central foreground region.
+        Dominant gradient direction θ = 0.5·arctan2(ΣGxy, ΣGxx-Gyy).
+        Ridge direction = θ + 90°.  Rotation needed = -(ridge angle - 90°).
+
+    Input
+    -----
+    gray : (H,W) uint8   raw grayscale fingerprint.
+    mask : (H,W) bool    foreground mask.
+
+    Output
+    ------
+    angle : float   degrees to rotate the image so the dominant ridges
+                    are approximately vertical (standard orientation).
+                    Constrained to [-45, +45] to avoid over-rotation.
+    """
+    H, W = gray.shape
+    cy, cx = H // 2, W // 2
+    radius = min(H, W) // 3
+
+    r0 = max(0, cy - radius);  r1 = min(H, cy + radius)
+    c0 = max(0, cx - radius);  c1 = min(W, cx + radius)
+
+    region = gray[r0:r1, c0:c1].astype(np.float64)
+    fg     = mask[r0:r1, c0:c1].astype(np.float64)
+
+    if fg.sum() < 100:
+        return 0.0
+
+    smooth = cv2.GaussianBlur(region, (5, 5), 1.5)
+    Gx = cv2.Sobel(smooth, cv2.CV_64F, 1, 0, ksize=3)
+    Gy = cv2.Sobel(smooth, cv2.CV_64F, 0, 1, ksize=3)
+
+    # Structure tensor (averaged over foreground)
+    Vx = float(np.sum((Gx**2 - Gy**2) * fg))
+    Vy = float(np.sum(2.0 * Gx * Gy * fg))
+
+    # Dominant ridge orientation (perpendicular to dominant gradient)
+    theta_grad  = 0.5 * np.arctan2(Vy, Vx)        # radians
+    theta_ridge = theta_grad + np.pi / 2           # ridge ⊥ gradient
+    rot_angle   = np.degrees(theta_ridge) - 90.0   # make ridges vertical
+
+    # Clamp to [-45, 45]
+    while rot_angle >  45.0: rot_angle -= 90.0
+    while rot_angle < -45.0: rot_angle += 90.0
+
+    return float(rot_angle)
+
+
+def normalize_fingerprint_orientation(gray: np.ndarray,
+                                       mask: np.ndarray) -> tuple:
+    """
+    Rotate fingerprint to canonical orientation so dominant ridges are vertical.
+
+    This is the KEY v4 fix: all subsequent spatial features (orientation field,
+    spatial minutiae density, ridge frequency map) are computed in this
+    normalised coordinate frame, making them approximately invariant to the
+    presentation angle of the finger on the sensor.
+
+    FVC2002 impressions of the same finger often differ by 5–15° of rotation.
+    Without normalisation, the orientation field vectors at fixed block positions
+    are completely different between impressions → same-subject cosine similarity
+    drops below different-subject similarity (the inversion seen in v3).
+
+    Input
+    -----
+    gray : (H,W) uint8   raw grayscale fingerprint.
+    mask : (H,W) bool    foreground mask.
+
+    Output
+    ------
+    gray_norm  : (H,W) uint8   rotation-corrected fingerprint image.
+    mask_norm  : (H,W) bool    rotation-corrected foreground mask.
+    ref_angle  : float         rotation applied in degrees.
+    """
+    H, W = gray.shape
+    angle = compute_reference_angle(gray, mask)
+
+    if abs(angle) < 1.5:            # skip trivial rotations (< 1.5°)
+        return gray, mask, 0.0
+
+    M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), angle, 1.0)
+    gray_norm = cv2.warpAffine(gray, M, (W, H),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_REPLICATE)
+    mask_norm = cv2.warpAffine(mask.astype(np.uint8), M, (W, H),
+                                flags=cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0).astype(bool)
+    return gray_norm, mask_norm, float(angle)
+
+
 def preprocess_fingerprint(img_path: str) -> dict:
     """
     Full preprocessing pipeline for one fingerprint image.
@@ -467,9 +574,12 @@ def preprocess_fingerprint(img_path: str) -> dict:
         log.warning(f"Cannot read image: {img_path}")
         return None
 
-    enhanced = enhance_with_gabor(img)
-    mask     = compute_foreground_mask(img)      # FIX v2: segment fg first
-    binary   = binarize(enhanced, mask)           # FIX v2: adaptive + masked
+    # v4: normalise orientation FIRST so all spatial features are rotation-invariant
+    mask_raw              = compute_foreground_mask(img)
+    img_norm, mask, angle = normalize_fingerprint_orientation(img, mask_raw)
+
+    enhanced = enhance_with_gabor(img_norm)
+    binary   = binarize(enhanced, mask)
     skeleton = compute_skeleton(binary)
     minutiae, types = extract_minutiae(skeleton)
 
@@ -478,14 +588,16 @@ def preprocess_fingerprint(img_path: str) -> dict:
         return None
 
     return {
-        "gray"     : img,
-        "enhanced" : enhanced,
-        "mask"     : mask,
-        "binary"   : binary,
-        "skeleton" : skeleton,
-        "minutiae" : minutiae,
-        "types"    : types,
-        "path"     : img_path,
+        "gray"      : img_norm,     # v4: orientation-normalised image
+        "gray_orig" : img,          # v4: original un-rotated image
+        "ref_angle" : angle,        # v4: rotation applied (degrees)
+        "enhanced"  : enhanced,
+        "mask"      : mask,
+        "binary"    : binary,
+        "skeleton"  : skeleton,
+        "minutiae"  : minutiae,
+        "types"     : types,
+        "path"      : img_path,
     }
 
 
@@ -1233,31 +1345,30 @@ def build_kd_index(global_descs: list, labels: list) -> tuple:
     """
     Build a KD-tree index for fast 1:N fingerprint identification.
 
-    v3 change: replaced per-row L2 normalization with per-column z-score
-    normalization.  The old L2 norm caused all 390D vectors to become nearly
-    parallel unit vectors (descriptor collapse).  Per-column z-score ensures
-    each feature dimension has zero mean and unit variance across the gallery,
-    so all 7 feature components contribute equally to the Euclidean distance.
+    v4 change: reverted to per-row L2 normalisation (unit-norm each vector).
+    The v3 per-column z-score was unstable with only 10 gallery samples and
+    could invert the distance ordering. Per-row L2 normalization is equivalent
+    to cosine similarity in the KD-tree, which matches the cosine_similarity
+    metric used in evaluate_verification.
 
     Input
     -----
-    global_descs : list of (~390,) float64 vectors
+    global_descs : list of (~466,) float64 vectors
     labels       : list of str
 
     Output
     ------
     kdtree : scipy.spatial.KDTree
     labels : list
-    mu     : (D,) float64   column means  (used to normalise query vectors)
-    sigma  : (D,) float64   column stds
+    mu     : None   (kept for API compatibility with query_kd_index)
+    sigma  : None
     """
     matrix = np.vstack(global_descs)
-    # Per-column z-score: each feature dimension → mean=0, std=1 across gallery
-    mu    = matrix.mean(axis=0)
-    sigma = matrix.std(axis=0) + 1e-9
-    matrix_z = (matrix - mu) / sigma
-    kdtree = KDTree(matrix_z)
-    return kdtree, labels, mu, sigma
+    # Per-row L2 normalise → Euclidean distance in unit-sphere ≈ cosine distance
+    norms  = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+    matrix = matrix / norms
+    kdtree = KDTree(matrix)
+    return kdtree, labels, None, None
 
 
 def query_kd_index(query_desc: np.ndarray,
@@ -1285,10 +1396,8 @@ def query_kd_index(query_desc: np.ndarray,
     results : list of (distance, label) tuples, sorted ascending by distance.
     """
     k   = k or CFG["k_nn"]
-    if mu is not None and sigma is not None:
-        vec = (query_desc - mu) / sigma
-    else:
-        vec = query_desc / (np.linalg.norm(query_desc) + 1e-9)
+    # v4: always use L2 row normalisation (mu/sigma ignored, kept for API compat)
+    vec = query_desc / (np.linalg.norm(query_desc) + 1e-9)
     dists, idxs = kdtree.query(vec, k=min(k, len(labels)))
     return list(zip(np.atleast_1d(dists), [labels[i] for i in np.atleast_1d(idxs)]))
 
@@ -1368,16 +1477,15 @@ def fingerprint_pair_score(result_a: dict, result_b: dict,
 # EVALUATION – FAR / FRR / EER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def evaluate_verification(results_by_subject: dict,
-                          use_pair_score: bool = True) -> dict:
+def evaluate_verification(results_by_subject: dict) -> dict:
     """
     Compute verification performance (FAR, FRR, EER).
 
-    v3 change: switched from cosine_similarity(global_desc) to
-    fingerprint_pair_score(result_dict), which combines:
-      • Global z-score Euclidean similarity (captures fingerprint class via orientation field)
-      • Local mutual NN descriptor matching (captures ridge topology)
-    This gives a score range of ~[0.05, 0.7] instead of [0.997, 1.0].
+    v4 change: reverted to cosine_similarity on global_desc.
+    The v3 pair_score was inverted because the orientation_field component
+    was not rotation-invariant (same-subject scored LOWER than different-subject).
+    With v4 orientation normalisation applied upstream, cosine_similarity now
+    correctly gives higher scores to genuine pairs.
 
     Genuine pairs  : same subject, all pairwise impression combinations.
     Impostor pairs : different subjects, first impression of each.
@@ -1386,47 +1494,31 @@ def evaluate_verification(results_by_subject: dict,
     -----
     results_by_subject : dict
         {subject_id: [result_dict_0, result_dict_1, …]}
-        where each result_dict is the output of process_fingerprint() OR
-        {"global_desc": ..., "node_descs": ...} for legacy compatibility.
-    use_pair_score : bool  If True, use fingerprint_pair_score; else use cosine_similarity.
+        Each result_dict must have key "global_desc" : (D,) float64.
 
     Output
     ------
-    metrics : dict (same keys as before + "score_mode")
+    metrics : dict with keys: genuine_scores, impostor_scores, eer,
+              eer_threshold, fnmr_at_fmr0001, auc, far_curve, frr_curve, thresholds
     """
     genuine_scores  = []
     impostor_scores = []
     subjects        = sorted(results_by_subject.keys())
 
-    # Build a shared z-score normalisation from all first impressions
-    all_gds = [results_by_subject[s][0]["global_desc"]
-               if isinstance(results_by_subject[s][0], dict) and "global_desc" in results_by_subject[s][0]
-               else results_by_subject[s][0]
-               for s in subjects]
-    try:
-        matrix_all = np.vstack(all_gds)
-        mu_all     = matrix_all.mean(axis=0)
-        sig_all    = matrix_all.std(axis=0) + 1e-9
-    except Exception:
-        mu_all = sig_all = None
+    def _get_desc(r):
+        return r["global_desc"] if isinstance(r, dict) else r
 
     def _score(r1, r2):
-        is_dict = isinstance(r1, dict) and "node_descs" in r1
-        if use_pair_score and is_dict:
-            return fingerprint_pair_score(r1, r2, mu=mu_all, sigma=sig_all)
-        # Fallback: cosine similarity on global desc
-        g1 = r1["global_desc"] if is_dict else r1
-        g2 = r2["global_desc"] if is_dict else r2
-        return cosine_similarity(g1, g2)
+        return cosine_similarity(_get_desc(r1), _get_desc(r2))
 
-    # Genuine pairs
+    # Genuine pairs (same subject, all impression combinations)
     for subj in subjects:
         results = results_by_subject[subj]
         for i in range(len(results)):
             for j in range(i + 1, len(results)):
                 genuine_scores.append(_score(results[i], results[j]))
 
-    # Impostor pairs
+    # Impostor pairs (first impression of each subject pair)
     for s1, s2 in combinations(subjects, 2):
         impostor_scores.append(_score(results_by_subject[s1][0],
                                        results_by_subject[s2][0]))
