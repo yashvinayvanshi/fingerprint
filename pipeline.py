@@ -225,6 +225,56 @@ def compute_foreground_mask(gray: np.ndarray) -> np.ndarray:
     return mask.astype(bool)
 
 
+def center_on_foreground(gray: np.ndarray, mask: np.ndarray) -> tuple:
+    """
+    Translate the fingerprint image so the foreground centroid aligns with
+    the image centre (H/2, W/2).
+
+    WHY: Between impressions of the same finger, the finger may be placed
+    at slightly different positions on the sensor (typically 10-40 px offset).
+    The orientation field is computed at FIXED absolute block positions, so
+    even a 20-pixel translation shifts ridge information into neighbouring
+    blocks, making same-subject orientation fields look very different.
+    Centroid-centering removes this systematic translation bias.
+
+    The centroid is the mean of all foreground (mask=True) pixel coordinates.
+    It is highly stable across impressions (it's a weighted average, not a
+    mode) and degrades gracefully for partial fingerprints.
+
+    Input
+    -----
+    gray : (H, W) uint8   grayscale fingerprint image.
+    mask : (H, W) bool    foreground mask.
+
+    Output
+    ------
+    gray_c : (H, W) uint8   translation-corrected image.
+    mask_c : (H, W) bool    translation-corrected foreground mask.
+    """
+    H, W = gray.shape
+    fg_y, fg_x = np.where(mask)
+    if len(fg_y) < 100:
+        return gray, mask
+
+    cy = int(round(fg_y.mean()))
+    cx = int(round(fg_x.mean()))
+    dy = H // 2 - cy
+    dx = W // 2 - cx
+
+    if abs(dy) < 3 and abs(dx) < 3:     # skip trivial shifts
+        return gray, mask
+
+    M      = np.float32([[1, 0, dx], [0, 1, dy]])
+    gray_c = cv2.warpAffine(gray, M, (W, H),
+                             flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+    mask_c = cv2.warpAffine(mask.astype(np.uint8), M, (W, H),
+                             flags=cv2.INTER_NEAREST,
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=0).astype(bool)
+    return gray_c, mask_c
+
+
 def enhance_with_gabor(gray: np.ndarray) -> np.ndarray:
     """
     Enhance fingerprint ridges with a bank of oriented Gabor filters.
@@ -552,9 +602,11 @@ def preprocess_fingerprint(img_path: str) -> dict:
         log.warning(f"Cannot read image: {img_path}")
         return None
 
-    # v4: normalise orientation FIRST so all spatial features are rotation-invariant
+    # Compute foreground mask, centre image on the foreground centroid (v5),
+    # then pass through the now-disabled rotation normaliser.
     mask_raw              = compute_foreground_mask(img)
-    img_norm, mask, angle = normalize_fingerprint_orientation(img, mask_raw)
+    img_c, mask_c         = center_on_foreground(img, mask_raw)  # translation normalization
+    img_norm, mask, angle = normalize_fingerprint_orientation(img_c, mask_c)
 
     enhanced = enhance_with_gabor(img_norm)
     binary   = binarize(enhanced, mask)
@@ -821,17 +873,18 @@ def compute_spectral_descriptor(sub_nodes: list,
         A[li, lj] += w
         A[lj, li] += w
 
-    D = np.diag(A.sum(axis=1))
-    L = D - A                       # Graph Laplacian
+    # Normalised graph Laplacian  L_sym = I − D^{−½} A D^{−½}
+    # Eigenvalues are guaranteed in [0, 2] regardless of graph size or
+    # absolute ridge-count scale, so no post-hoc normalisation is needed.
+    d          = A.sum(axis=1)
+    d_inv_sqrt = np.where(d > 1e-9, 1.0 / np.sqrt(d), 0.0)
+    D_inv_sqrt = np.diag(d_inv_sqrt)
+    L          = np.eye(n) - D_inv_sqrt @ A @ D_inv_sqrt   # L_sym
 
     try:
-        eigs = np.sort(np.abs(eigvalsh(L)))   # real, non-negative for PSD L
+        eigs = np.sort(np.abs(eigvalsh(L)))   # ∈ [0, 2]
     except Exception:
         eigs = np.zeros(n)
-
-    # Normalise to [0, 1] → scale-invariant (independent of absolute ridge counts)
-    if eigs.max() > 1e-9:
-        eigs = eigs / eigs.max()
 
     # Pad to `size` (zero-pad) or truncate
     if len(eigs) >= size:
@@ -1231,8 +1284,11 @@ def compute_global_laplacian_spectrum(edges: np.ndarray,
         w = float(weight_dict.get((min(i,j), max(i,j)), 1))
         A[i, j] += w
         A[j, i] += w
-    D   = np.diag(A.sum(axis=1))
-    L   = D - A
+    # Normalised Laplacian — eigenvalues ∈ [0, 2], scale-invariant
+    d          = A.sum(axis=1)
+    d_inv_sqrt = np.where(d > 1e-9, 1.0 / np.sqrt(d), 0.0)
+    D_inv_sqrt = np.diag(d_inv_sqrt)
+    L          = np.eye(n) - D_inv_sqrt @ A @ D_inv_sqrt
     try:
         eigs = np.sort(np.abs(eigvalsh(L)))
     except Exception:
@@ -1345,7 +1401,7 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
 
     # ── 5. Orientation field [NEW — primary discriminator] ───────────────────
     if gray is not None:
-        orient = compute_orientation_field(gray, block_size=48)
+        orient = compute_orientation_field(gray, block_size=32)
         # orient contains [cos2θ ∈ [-1,1], sin2θ ∈ [-1,1], log_energy ≥ 0]
         # Normalise log_energy sub-vector to [0, 1]
         n_blocks = len(orient) // 3
@@ -1368,7 +1424,7 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
 
     # ── 7. Ridge frequency map ────────────────────────────────────────────────
     if gray is not None and mask is not None:
-        freq_feats = compute_ridge_frequency_features(gray, mask, block_size=48)
+        freq_feats = compute_ridge_frequency_features(gray, mask, block_size=32)
         freq_feats = freq_feats / (freq_feats.max() + 1e-9)  # normalise to [0,1]
     else:
         freq_feats = np.zeros(64)
@@ -1694,17 +1750,7 @@ def evaluate_identification(gallery_labels: list,
                             query_descs:   list,
                             rank: int = 1) -> float:
     """
-    Compute Rank-k identification accuracy.
-
-    Input
-    -----
-    gallery_labels / descs : list  – gallery set (first impression per subject)
-    query_labels   / descs : list  – query set   (remaining impressions)
-    rank                   : int   – Rank-k (default 1)
-
-    Output
-    ------
-    rank_k_acc : float  (0–1)
+    Rank-k identification using global-descriptor KD-tree (fast baseline).
     """
     if not gallery_descs or not query_descs:
         return 0.0
@@ -1717,6 +1763,52 @@ def evaluate_identification(gallery_labels: list,
         q_subj   = qlabel.split("_")[0]
         g_subjts = [lbl.split("_")[0] for lbl in top_k]
         if q_subj in g_subjts:
+            correct += 1
+
+    return correct / len(query_labels)
+
+
+def evaluate_identification_pairwise(gallery_results: list,
+                                      gallery_labels:  list,
+                                      query_results:   list,
+                                      query_labels:    list,
+                                      rank: int = 1) -> float:
+    """
+    Rank-k identification using the full fingerprint_pair_score (global + local).
+
+    WHY THIS IS BETTER: The KD-tree approach uses only the global descriptor
+    (cosine similarity ≈ orientation field + graph spectrum).  fingerprint_pair_score
+    additionally incorporates per-node spectral + ridge-count local matching,
+    which provides a complementary, distortion-resilient signal.
+
+    With only 10 gallery items, exhaustive pairwise scoring is fast (10 scores
+    per query ≈ 700 comparisons total for 70 queries).  The combined score
+    separates same-subject from cross-subject pairs much more reliably than
+    the global descriptor alone, driving Rank-1 accuracy significantly higher.
+
+    Input
+    -----
+    gallery_results / labels : list  – gallery set (first impression, full dicts)
+    query_results   / labels : list  – query set   (remaining impressions)
+    rank                     : int   – Rank-k (default 1)
+
+    Output
+    ------
+    rank_k_acc : float  (0–1)
+    """
+    if not gallery_results or not query_results:
+        return 0.0
+
+    correct = 0
+    for qres, qlabel in zip(query_results, query_labels):
+        # Score query against every gallery item
+        scored = sorted(
+            [(fingerprint_pair_score(qres, gres), glabel)
+             for gres, glabel in zip(gallery_results, gallery_labels)],
+            key=lambda x: x[0], reverse=True
+        )
+        top_k_subjects = {lbl.split("_")[0] for _, lbl in scored[:rank]}
+        if qlabel.split("_")[0] in top_k_subjects:
             correct += 1
 
     return correct / len(query_labels)
@@ -2013,9 +2105,11 @@ def main():
         # Process all images ──────────────────────────────────────────────────
         log.info(f"\n[Phase 1-3]  Feature extraction …")
 
-        gallery_descs, gallery_labels = [], []
-        query_descs,   query_labels   = [], []
-        by_subject                    = defaultdict(list)
+        gallery_descs,   gallery_labels   = [], []
+        gallery_results, _gallery_labels2 = [], []   # full dicts for pairwise ID
+        query_descs,     query_labels     = [], []
+        query_results,   _query_labels2   = [], []   # full dicts for pairwise ID
+        by_subject                        = defaultdict(list)
 
         all_paths = []
         for subj_id in sorted(subject_map.keys()):
@@ -2039,9 +2133,11 @@ def main():
             if len(by_subject[subj_id]) == 1:
                 gallery_descs.append(res["global_desc"])
                 gallery_labels.append(label)
+                gallery_results.append(res)       # full dict for pairwise ID
             else:
                 query_descs.append(res["global_desc"])
                 query_labels.append(label)
+                query_results.append(res)          # full dict for pairwise ID
 
 
             # ── Save intermediate visualisations for the very first image ──
@@ -2075,20 +2171,23 @@ def main():
             visualise_phase4(metrics, db_name, tag=db_name)
 
         # ── Identification evaluation ─────────────────────────────────────────
-        if gallery_descs and query_descs:
+        if gallery_results and query_results:
             log.info(f"\n[Phase 4]  Identification (Rank-1) …")
             t_idx   = time.time()
-            rank1   = evaluate_identification(gallery_labels, gallery_descs,
-                                              query_labels,   query_descs, rank=1)
-            rank5   = evaluate_identification(gallery_labels, gallery_descs,
-                                              query_labels,   query_descs, rank=5)
-            # v3: note — evaluate_identification uses the 4-tuple from build_kd_index
+            # Pairwise scoring (global + local) — far more accurate than
+            # pure KD-tree on global descriptor.
+            rank1   = evaluate_identification_pairwise(
+                          gallery_results, gallery_labels,
+                          query_results,   query_labels,   rank=1)
+            rank5   = evaluate_identification_pairwise(
+                          gallery_results, gallery_labels,
+                          query_results,   query_labels,   rank=5)
             t_match = time.time() - t_idx
 
             log.info(f"  Rank-1 accuracy  : {rank1:.2%}")
             log.info(f"  Rank-5 accuracy  : {rank5:.2%}")
-            log.info(f"  KD-tree query time (all queries): {t_match*1000:.1f} ms  "
-                     f"→ {t_match*1000/max(1,len(query_descs)):.2f} ms/query")
+            log.info(f"  Pairwise score time (all queries): {t_match*1000:.1f} ms  "
+                     f"→ {t_match*1000/max(1,len(query_results)):.2f} ms/query")
         else:
             rank1, rank5, t_match = 0.0, 0.0, 0.0
 
