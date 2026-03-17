@@ -1,11 +1,12 @@
 import os
 import glob
 import logging
+import math
 import cv2
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
-from skimage.morphology import skeletonize, thin
+from skimage.morphology import skeletonize
 from skimage.draw import line
 from scipy.spatial import Delaunay
 from sklearn.neighbors import KDTree
@@ -15,18 +16,13 @@ from collections import Counter
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_fvc_dataset(base_path):
-    """
-    Input: String path to the base dataset directory (e.g., './datasets/PAMI Lab').
-    Output: List of tuples (file_path, finger_id).
-    """
+    """Loads image paths and finger IDs from the FVC dataset structure."""
     image_paths = []
-    # Search through DB1_B, DB2_B, DB3_B, DB4_B
     search_pattern = os.path.join(base_path, "DB*_B", "*.*")
     files = glob.glob(search_pattern)
     
     for file in files:
         filename = os.path.basename(file)
-        # Assuming standard FVC naming convention: '101_1.tif' -> ID 101, Impression 1
         try:
             finger_id = filename.split('_')[0]
             image_paths.append((file, finger_id))
@@ -37,21 +33,23 @@ def load_fvc_dataset(base_path):
     return image_paths
 
 def preprocess_and_thin(image_path, save_debug=False, debug_dir="./debug"):
-    """
-    Phase 1.1: Standard robust edge-detection and morphological thinning.
-    Input: Path to the image file.
-    Output: Binary thinned skeleton image (numpy array).
-    """
+    """Phase 1.1: Image enhancement, margin clearing, and morphological thinning."""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         return None
         
-    # Enhance contrast and binarize
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     enhanced = clahe.apply(img)
     _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
-    # Morphological thinning to 1-pixel wide ridges
+    # --- NEW: Clear the borders to prevent the bounding box artifact ---
+    margin = 15
+    binary[:margin, :] = 0        # Top edge
+    binary[-margin:, :] = 0       # Bottom edge
+    binary[:, :margin] = 0        # Left edge
+    binary[:, -margin:] = 0       # Right edge
+    # -------------------------------------------------------------------
+    
     binary_bool = binary > 0
     skeleton = skeletonize(binary_bool)
     
@@ -62,35 +60,61 @@ def preprocess_and_thin(image_path, save_debug=False, debug_dir="./debug"):
         
     return skeleton
 
-def extract_minutiae(skeleton, max_points=100):
-    """
-    Phase 1.1 (cont): Isolate minutiae points (vertices V).
-    Input: Thinned boolean image.
-    Output: List of (x, y) coordinates representing nodes.
-    """
-    # For demonstration, we use a proxy for minutiae (Harris corners on skeleton)
-    # A true minutiae extractor would use a 3x3 crossing number algorithm.
-    skeleton_uint8 = (skeleton * 255).astype(np.uint8)
-    corners = cv2.goodFeaturesToTrack(skeleton_uint8, max_points, 0.01, 10)
+def extract_minutiae_crossing_number(skeleton):
+    """Extracts true ridge endings and bifurcations using the 3x3 Crossing Number method."""
+    skeleton_bool = skeleton > 0
+    minutiae = []
+    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+    rows, cols = skeleton_bool.shape
     
-    if corners is not None:
-        minutiae = [tuple(map(int, pt[0])) for pt in corners]
-        return minutiae
-    return []
+    for r in range(1, rows - 1):
+        for c in range(1, cols - 1):
+            if skeleton_bool[r, c]:
+                p = [skeleton_bool[r + dr, c + dc] for dr, dc in neighbors]
+                transitions = sum(1 for i in range(8) if p[i] != p[i+1])
+                cn = transitions / 2
+                
+                # CN == 1 (Ending), CN == 3 (Bifurcation)
+                if cn == 1 or cn == 3:
+                    minutiae.append((c, r)) 
+    return minutiae
+
+def filter_minutiae(minutiae, image_shape, border_dist=20, min_dist=10):
+    """Filters spurious minutiae near borders and merges dense noise clusters."""
+    filtered = []
+    rows, cols = image_shape
+    
+    # 1. Border Filtering
+    for x, y in minutiae:
+        if (x > border_dist and x < cols - border_dist and 
+            y > border_dist and y < rows - border_dist):
+            filtered.append((x, y))
+            
+    # 2. Greedy Distance Filtering (Fixes the annihilation bug)
+    final_minutiae = []
+    for p in filtered:
+        is_too_close = False
+        for kept_p in final_minutiae:
+            dist = math.hypot(p[0] - kept_p[0], p[1] - kept_p[1])
+            if dist < min_dist:
+                is_too_close = True
+                break
+        
+        # Only add the point if it isn't too close to one we've already saved
+        if not is_too_close:
+            final_minutiae.append(p)
+            
+    return final_minutiae
 
 def build_delaunay_graph(minutiae, save_debug=False, debug_dir="./debug"):
-    """
-    Phase 1.2: Apply Delaunay Triangulation to form edges E.
-    Input: List of (x,y) minutiae coordinates.
-    Output: List of edges (index1, index2).
-    """
+    """Phase 1.2: Applies Delaunay Triangulation to form the localized mesh."""
     if len(minutiae) < 4:
         return []
         
     points = np.array(minutiae)
     tri = Delaunay(points)
-    
     edges = set()
+    
     for simplex in tri.simplices:
         edges.add(tuple(sorted([simplex[0], simplex[1]])))
         edges.add(tuple(sorted([simplex[1], simplex[2]])))
@@ -99,99 +123,72 @@ def build_delaunay_graph(minutiae, save_debug=False, debug_dir="./debug"):
     if save_debug:
         plt.figure()
         plt.triplot(points[:, 0], points[:, 1], tri.simplices.copy())
-        plt.plot(points[:, 0], points[:, 1], 'ro')
+        plt.plot(points[:, 0], points[:, 1], 'ro', markersize=3)
         plt.gca().invert_yaxis()
+        plt.title("Filtered Minutiae & Delaunay Topology")
         plt.savefig(os.path.join(debug_dir, "3_delaunay.png"))
         plt.close()
         
     return list(edges)
 
 def calculate_ridge_counts(skeleton, minutiae, edges):
-    """
-    Phase 2: Distortion-Proof Edge Weights (Ridge Counting).
-    Input: Skeleton image, minutiae points, edges.
-    Output: Dictionary mapping edge (i, j) to an integer ridge count.
-    """
+    """Phase 2: Computes distortion-proof edge weights via ridge counting."""
     ridge_counts = {}
     for (i, j) in edges:
         x0, y0 = minutiae[i]
         x1, y1 = minutiae[j]
         
-        # Get pixels along the line between two minutiae
         rr, cc = line(y0, x0, y1, x1)
-        
-        # Ensure coordinates are within image bounds
         valid = (rr >= 0) & (rr < skeleton.shape[0]) & (cc >= 0) & (cc < skeleton.shape[1])
         rr, cc = rr[valid], cc[valid]
         
         line_pixels = skeleton[rr, cc]
-        
-        # Count transitions from 0 to 1 (ridge crossings)
         transitions = np.sum(np.diff(line_pixels.astype(int)) > 0)
         ridge_counts[(i, j)] = transitions
         
     return ridge_counts
 
 def extract_spectral_descriptors(minutiae, edges, ridge_counts, k_hops=2, desc_len=5):
-    """
-    Phase 3: Spectral Description of local subgraphs.
-    Input: Graph data and parameters.
-    Output: List of fixed-length numerical vectors (Spectral Descriptors).
-    """
+    """Phase 3: Generates localized invariant vectors (eigenvalues of Laplacian)."""
     G = nx.Graph()
     for idx, pt in enumerate(minutiae):
         G.add_node(idx, pos=pt)
-        
     for (i, j), weight in ridge_counts.items():
         G.add_edge(i, j, weight=weight)
         
     descriptors = []
-    
     for node in G.nodes():
-        # 1. Extract local k-hop neighborhood subgraph
         subgraph_nodes = nx.single_source_shortest_path_length(G, node, cutoff=k_hops).keys()
         subgraph = G.subgraph(subgraph_nodes)
         
-        if len(subgraph) < 3: # Ignore trivially small subgraphs
+        if len(subgraph) < 3: 
             continue
             
-        # 2. Compute Graph Laplacian L = D - A
         L = nx.laplacian_matrix(subgraph, weight='weight').todense()
+        eigenvalues = np.sort(np.linalg.eigvalsh(L))
         
-        # 3. Extract ordered eigenvalues
-        eigenvalues = np.linalg.eigvalsh(L)
-        eigenvalues = np.sort(eigenvalues)
-        
-        # Pad or truncate to fixed length
         if len(eigenvalues) >= desc_len:
             descriptor = eigenvalues[:desc_len]
         else:
             descriptor = np.pad(eigenvalues, (0, desc_len - len(eigenvalues)), 'constant')
             
         descriptors.append(descriptor)
-        
     return descriptors
 
 def build_database_index(dataset_paths):
-    """
-    Phase 4.1: Convert all dataset images into descriptors and index them.
-    Input: List of dataset tuples (path, finger_id).
-    Output: KDTree, array of all descriptors, array of corresponding finger IDs.
-    """
+    """Phase 4.1: Vectorizes enrollment images and builds O(logN) spatial index."""
     all_descriptors = []
     descriptor_labels = []
-    
     first_sample = True
     
     for path, finger_id in dataset_paths:
         skeleton = preprocess_and_thin(path, save_debug=first_sample)
-        if skeleton is None:
-            continue
+        if skeleton is None: continue
             
-        minutiae = extract_minutiae(skeleton)
+        raw_minutiae = extract_minutiae_crossing_number(skeleton)
+        minutiae = filter_minutiae(raw_minutiae, skeleton.shape)
         edges = build_delaunay_graph(minutiae, save_debug=first_sample)
         ridge_counts = calculate_ridge_counts(skeleton, minutiae, edges)
-        
         descriptors = extract_spectral_descriptors(minutiae, edges, ridge_counts)
         
         for desc in descriptors:
@@ -202,24 +199,17 @@ def build_database_index(dataset_paths):
             logging.info(f"Saved intermediate debug images for sample: {path}")
             first_sample = False
             
-    if not all_descriptors:
-        raise ValueError("No descriptors could be extracted from the dataset.")
-        
     X = np.array(all_descriptors)
-    tree = KDTree(X, metric='euclidean') # Phase 4: Ultrafast Vector Matching
-    
+    tree = KDTree(X, metric='euclidean')
     return tree, X, np.array(descriptor_labels)
 
-def match_fingerprint_query(query_path, kd_tree, database_labels):
-    """
-    Phase 4.2: Match a single query image against the KD-Tree.
-    Input: Path to query image, the populated KDTree, and the DB labels.
-    Output: Predicted Finger ID.
-    """
+def match_fingerprint_query(query_path, kd_tree, database_labels, max_l2_distance=0.5):
+    """Phase 4.2: Matches query image against index with strict FRR/FAR thresholding."""
     skeleton = preprocess_and_thin(query_path)
     if skeleton is None: return None
     
-    minutiae = extract_minutiae(skeleton)
+    raw_minutiae = extract_minutiae_crossing_number(skeleton)
+    minutiae = filter_minutiae(raw_minutiae, skeleton.shape)
     edges = build_delaunay_graph(minutiae)
     ridge_counts = calculate_ridge_counts(skeleton, minutiae, edges)
     query_descriptors = extract_spectral_descriptors(minutiae, edges, ridge_counts)
@@ -227,16 +217,15 @@ def match_fingerprint_query(query_path, kd_tree, database_labels):
     if not query_descriptors:
         return None
         
-    # Search tree in O(logN) time
     query_vectors = np.array(query_descriptors)
     distances, indices = kd_tree.query(query_vectors, k=3)
     
-    # Majority vote from nearest neighbors across all descriptors
     votes = []
-    for idx_list in indices:
-        for idx in idx_list:
-            votes.append(database_labels[idx])
-            
+    for i, idx_list in enumerate(indices):
+        for j, db_idx in enumerate(idx_list):
+            if distances[i][j] < max_l2_distance:
+                votes.append(database_labels[db_idx])
+                
     if votes:
         most_common = Counter(votes).most_common(1)[0][0]
         return most_common
@@ -244,7 +233,6 @@ def match_fingerprint_query(query_path, kd_tree, database_labels):
 
 def main():
     logging.info("Starting TRC-SD Fingerprint Pipeline...")
-    
     dataset_path = "./datasets/PAMI Lab"
     all_images = load_fvc_dataset(dataset_path)
     
@@ -252,7 +240,7 @@ def main():
         logging.error("No images found. Please check dataset path.")
         return
         
-    # Validation Setup: Split into enrollment (impression 1-6) and query (impression 7-8)
+    # Split: Enrollment (1-6) and Query (7-8)
     enrollment_set = [item for item in all_images if int(os.path.basename(item[0]).split('_')[1].split('.')[0]) <= 6]
     query_set = [item for item in all_images if int(os.path.basename(item[0]).split('_')[1].split('.')[0]) > 6]
     
@@ -264,8 +252,11 @@ def main():
     correct_matches = 0
     total_queries = len(query_set)
     
+    # Optional: adjust max_l2_distance to tune the FAR vs FRR tradeoff
+    distance_threshold = 0.4 
+    
     for q_path, true_id in query_set:
-        predicted_id = match_fingerprint_query(q_path, kd_tree, db_labels)
+        predicted_id = match_fingerprint_query(q_path, kd_tree, db_labels, max_l2_distance=distance_threshold)
         if predicted_id == true_id:
             correct_matches += 1
             
