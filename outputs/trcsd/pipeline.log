@@ -1,114 +1,114 @@
-23:37:51  INFO      =================================================================
-23:37:51  INFO        TRC-SD Fingerprint Recognition Pipeline
-23:37:51  INFO        DSM 410 – Computer Vision | IIT Indore
-23:37:51  INFO      =================================================================
-23:37:51  INFO      
+00:41:11  INFO      =================================================================
+00:41:11  INFO        TRC-SD Fingerprint Recognition Pipeline
+00:41:11  INFO        DSM 410 – Computer Vision | IIT Indore
+00:41:11  INFO      =================================================================
+00:41:11  INFO      
 [Phase 0]  Loading FVC2002 dataset …
-23:37:51  INFO        DB1_B: 10 subjects, 80 images
-23:37:51  INFO        DB2_B: 10 subjects, 80 images
-23:37:51  INFO        DB3_B: 10 subjects, 80 images
-23:37:51  INFO        DB4_B: 10 subjects, 80 images
-23:37:51  INFO        Loaded 4 databases: ['DB1_B', 'DB2_B', 'DB3_B', 'DB4_B']
-23:37:51  INFO      
+00:41:11  INFO        DB1_B: 10 subjects, 80 images
+00:41:11  INFO        DB2_B: 10 subjects, 80 images
+00:41:11  INFO        DB3_B: 10 subjects, 80 images
+00:41:11  INFO        DB4_B: 10 subjects, 80 images
+00:41:11  INFO        Loaded 4 databases: ['DB1_B', 'DB2_B', 'DB3_B', 'DB4_B']
+00:41:11  INFO      
 ────────────────────────────────────────────────────────────
-23:37:51  INFO        Database: DB1_B  |  10 subjects
-23:37:51  INFO      ────────────────────────────────────────────────────────────
-23:37:51  INFO      
+00:41:11  INFO        Database: DB1_B  |  10 subjects
+00:41:11  INFO      ────────────────────────────────────────────────────────────
+00:41:11  INFO      
 [Phase 1-3]  Feature extraction …
-23:37:51  INFO      
+00:41:12  INFO      
   Saving pipeline visualisations for: 101_1.tif
-23:37:51  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_1_preprocessing.png
-23:37:52  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_2_delaunay.png
-23:37:53  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase2_ridge_weights.png
-23:37:53  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase3_spectral.png
-23:37:53  INFO      
-23:38:06  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
-23:38:06  INFO      
+00:41:12  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_1_preprocessing.png
+00:41:13  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_2_delaunay.png
+00:41:13  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase2_ridge_weights.png
+00:41:14  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase3_spectral.png
+00:41:14  INFO      
+00:41:26  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+00:41:26  INFO      
 [Phase 4 / Eval]  Verification …
-23:38:06  INFO        Genuine pairs   : 280
-23:38:06  INFO        Impostor pairs  : 45
-23:38:06  INFO        EER             : 40.75%  (threshold=0.856)
-23:38:06  INFO        FNMR @ FMR=0.1%: 100.00%
-23:38:06  INFO        AUC             : 0.6310
-23:38:06  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase4_evaluation.png
-23:38:06  INFO      
+00:41:26  INFO        Genuine pairs   : 280
+00:41:26  INFO        Impostor pairs  : 45
+00:41:26  INFO        EER             : 34.92%  (threshold=0.726)
+00:41:26  INFO        FNMR @ FMR=0.1%: 100.00%
+00:41:26  INFO        AUC             : 0.6935
+00:41:27  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase4_evaluation.png
+00:41:27  INFO      
 [Phase 4]  Identification (Rank-1) …
-23:38:06  INFO        Rank-1 accuracy  : 35.71%
-23:38:06  INFO        Rank-5 accuracy  : 74.29%
-23:38:06  INFO        KD-tree query time (all queries): 6.5 ms  → 0.09 ms/query
-23:38:06  INFO      
+00:41:27  INFO        Rank-1 accuracy  : 37.14%
+00:41:27  INFO        Rank-5 accuracy  : 87.14%
+00:41:27  INFO        KD-tree query time (all queries): 4.3 ms  → 0.06 ms/query
+00:41:27  INFO      
 ────────────────────────────────────────────────────────────
-23:38:06  INFO        Database: DB2_B  |  10 subjects
-23:38:06  INFO      ────────────────────────────────────────────────────────────
-23:38:06  INFO      
+00:41:27  INFO        Database: DB2_B  |  10 subjects
+00:41:27  INFO      ────────────────────────────────────────────────────────────
+00:41:27  INFO      
 [Phase 1-3]  Feature extraction …
-23:38:25  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
-23:38:25  INFO      
+00:41:42  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+00:41:42  INFO      
 [Phase 4 / Eval]  Verification …
-23:38:25  INFO        Genuine pairs   : 280
-23:38:25  INFO        Impostor pairs  : 45
-23:38:25  INFO        EER             : 47.84%  (threshold=0.843)
-23:38:25  INFO        FNMR @ FMR=0.1%: 100.00%
-23:38:25  INFO        AUC             : 0.5206
-23:38:25  INFO          Saved: outputs/trcsd/sample_vis/DB2_B_phase4_evaluation.png
-23:38:25  INFO      
+00:41:43  INFO        Genuine pairs   : 280
+00:41:43  INFO        Impostor pairs  : 45
+00:41:43  INFO        EER             : 38.17%  (threshold=0.709)
+00:41:43  INFO        FNMR @ FMR=0.1%: 100.00%
+00:41:43  INFO        AUC             : 0.6556
+00:41:43  INFO          Saved: outputs/trcsd/sample_vis/DB2_B_phase4_evaluation.png
+00:41:43  INFO      
 [Phase 4]  Identification (Rank-1) …
-23:38:25  INFO        Rank-1 accuracy  : 21.43%
-23:38:25  INFO        Rank-5 accuracy  : 68.57%
-23:38:25  INFO        KD-tree query time (all queries): 4.6 ms  → 0.07 ms/query
-23:38:25  INFO      
+00:41:43  INFO        Rank-1 accuracy  : 38.57%
+00:41:43  INFO        Rank-5 accuracy  : 68.57%
+00:41:43  INFO        KD-tree query time (all queries): 4.6 ms  → 0.07 ms/query
+00:41:43  INFO      
 ────────────────────────────────────────────────────────────
-23:38:25  INFO        Database: DB3_B  |  10 subjects
-23:38:25  INFO      ────────────────────────────────────────────────────────────
-23:38:25  INFO      
+00:41:43  INFO        Database: DB3_B  |  10 subjects
+00:41:43  INFO      ────────────────────────────────────────────────────────────
+00:41:43  INFO      
 [Phase 1-3]  Feature extraction …
-23:38:36  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
-23:38:36  INFO      
+00:41:54  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+00:41:54  INFO      
 [Phase 4 / Eval]  Verification …
-23:38:36  INFO        Genuine pairs   : 280
-23:38:36  INFO        Impostor pairs  : 45
-23:38:36  INFO        EER             : 42.72%  (threshold=0.913)
-23:38:36  INFO        FNMR @ FMR=0.1%: 100.00%
-23:38:36  INFO        AUC             : 0.5760
-23:38:37  INFO          Saved: outputs/trcsd/sample_vis/DB3_B_phase4_evaluation.png
-23:38:37  INFO      
+00:41:54  INFO        Genuine pairs   : 280
+00:41:54  INFO        Impostor pairs  : 45
+00:41:54  INFO        EER             : 38.45%  (threshold=0.743)
+00:41:54  INFO        FNMR @ FMR=0.1%: 100.00%
+00:41:54  INFO        AUC             : 0.6045
+00:41:54  INFO          Saved: outputs/trcsd/sample_vis/DB3_B_phase4_evaluation.png
+00:41:54  INFO      
 [Phase 4]  Identification (Rank-1) …
-23:38:37  INFO        Rank-1 accuracy  : 35.71%
-23:38:37  INFO        Rank-5 accuracy  : 64.29%
-23:38:37  INFO        KD-tree query time (all queries): 4.0 ms  → 0.06 ms/query
-23:38:37  INFO      
+00:41:54  INFO        Rank-1 accuracy  : 38.57%
+00:41:54  INFO        Rank-5 accuracy  : 82.86%
+00:41:54  INFO        KD-tree query time (all queries): 4.0 ms  → 0.06 ms/query
+00:41:54  INFO      
 ────────────────────────────────────────────────────────────
-23:38:37  INFO        Database: DB4_B  |  10 subjects
-23:38:37  INFO      ────────────────────────────────────────────────────────────
-23:38:37  INFO      
+00:41:54  INFO        Database: DB4_B  |  10 subjects
+00:41:54  INFO      ────────────────────────────────────────────────────────────
+00:41:54  INFO      
 [Phase 1-3]  Feature extraction …
-23:38:48  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
-23:38:48  INFO      
+00:42:06  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+00:42:06  INFO      
 [Phase 4 / Eval]  Verification …
-23:38:48  INFO        Genuine pairs   : 280
-23:38:48  INFO        Impostor pairs  : 45
-23:38:48  INFO        EER             : 41.83%  (threshold=0.900)
-23:38:48  INFO        FNMR @ FMR=0.1%: 100.00%
-23:38:48  INFO        AUC             : 0.6350
-23:38:49  INFO          Saved: outputs/trcsd/sample_vis/DB4_B_phase4_evaluation.png
-23:38:49  INFO      
+00:42:06  INFO        Genuine pairs   : 280
+00:42:06  INFO        Impostor pairs  : 45
+00:42:06  INFO        EER             : 32.74%  (threshold=0.726)
+00:42:06  INFO        FNMR @ FMR=0.1%: 100.00%
+00:42:06  INFO        AUC             : 0.6487
+00:42:06  INFO          Saved: outputs/trcsd/sample_vis/DB4_B_phase4_evaluation.png
+00:42:06  INFO      
 [Phase 4]  Identification (Rank-1) …
-23:38:49  INFO        Rank-1 accuracy  : 24.29%
-23:38:49  INFO        Rank-5 accuracy  : 71.43%
-23:38:49  INFO        KD-tree query time (all queries): 3.9 ms  → 0.06 ms/query
-23:38:49  INFO      
+00:42:06  INFO        Rank-1 accuracy  : 24.29%
+00:42:06  INFO        Rank-5 accuracy  : 72.86%
+00:42:06  INFO        KD-tree query time (all queries): 4.1 ms  → 0.06 ms/query
+00:42:06  INFO      
 ═════════════════════════════════════════════════════════════════
-23:38:49  INFO        VALIDATION RESULTS SUMMARY
-23:38:49  INFO      ═════════════════════════════════════════════════════════════════
-23:38:49  INFO        Database      #Images      EER    FNMR@0.1%      AUC    Rank-1    Rank-5
-23:38:49  INFO        -------------------------------------------------------------------
-23:38:49  INFO        DB1_B              80   40.75%      100.00%   0.6310    35.71%    74.29%
-23:38:49  INFO        DB2_B              80   47.84%      100.00%   0.5206    21.43%    68.57%
-23:38:49  INFO        DB3_B              80   42.72%      100.00%   0.5760    35.71%    64.29%
-23:38:49  INFO        DB4_B              80   41.83%      100.00%   0.6350    24.29%    71.43%
-23:38:49  INFO      
-  Total wall-clock time : 58.0 s
-23:38:49  INFO        Outputs saved to      : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd
-23:38:49  INFO        Sample visualisations : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd/sample_vis
-23:38:49  INFO      ═════════════════════════════════════════════════════════════════
+00:42:06  INFO        VALIDATION RESULTS SUMMARY
+00:42:06  INFO      ═════════════════════════════════════════════════════════════════
+00:42:06  INFO        Database      #Images      EER    FNMR@0.1%      AUC    Rank-1    Rank-5
+00:42:06  INFO        -------------------------------------------------------------------
+00:42:06  INFO        DB1_B              80   34.92%      100.00%   0.6935    37.14%    87.14%
+00:42:06  INFO        DB2_B              80   38.17%      100.00%   0.6556    38.57%    68.57%
+00:42:06  INFO        DB3_B              80   38.45%      100.00%   0.6045    38.57%    82.86%
+00:42:06  INFO        DB4_B              80   32.74%      100.00%   0.6487    24.29%    72.86%
+00:42:06  INFO      
+  Total wall-clock time : 55.0 s
+00:42:06  INFO        Outputs saved to      : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd
+00:42:06  INFO        Sample visualisations : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd/sample_vis
+00:42:06  INFO      ═════════════════════════════════════════════════════════════════
 

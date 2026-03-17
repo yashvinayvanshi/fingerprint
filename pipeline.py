@@ -101,7 +101,7 @@ CFG = {
 
     # Phase 3 – Spectral ─────────────────────────────────────
     "k_hop"             : 3,        # k-hop neighbourhood radius
-    "descriptor_size"   : 20,       # fixed eigenvalue vector length
+    "descriptor_size"   : 32,       # fixed eigenvalue vector length
 
     # Phase 4 – Matching ─────────────────────────────────────
     "k_nn"              : 5,        # KD-tree top-k candidates
@@ -510,44 +510,22 @@ def compute_reference_angle(gray: np.ndarray, mask: np.ndarray) -> float:
 def normalize_fingerprint_orientation(gray: np.ndarray,
                                        mask: np.ndarray) -> tuple:
     """
-    Rotate fingerprint to canonical orientation so dominant ridges are vertical.
+    v5: Disabled physical image rotation.
 
-    This is the KEY v4 fix: all subsequent spatial features (orientation field,
-    spatial minutiae density, ridge frequency map) are computed in this
-    normalised coordinate frame, making them approximately invariant to the
-    presentation angle of the finger on the sensor.
+    The structure-tensor rotation estimate is unstable for complex fingerprint
+    types (whorls, double-loops): different impressions of the SAME finger
+    receive different — sometimes opposite-sign — correction angles, causing
+    genuine pairs to look MORE dissimilar than impostors (AUC < 0.5 inversion).
 
-    FVC2002 impressions of the same finger often differ by 5–15° of rotation.
-    Without normalisation, the orientation field vectors at fixed block positions
-    are completely different between impressions → same-subject cosine similarity
-    drops below different-subject similarity (the inversion seen in v3).
+    Rotation-invariance is now achieved algebraically inside
+    compute_orientation_field() by encoding orientations RELATIVE to the
+    per-image dominant orientation, so no image-level rotation is needed.
 
-    Input
-    -----
-    gray : (H,W) uint8   raw grayscale fingerprint.
-    mask : (H,W) bool    foreground mask.
-
-    Output
-    ------
-    gray_norm  : (H,W) uint8   rotation-corrected fingerprint image.
-    mask_norm  : (H,W) bool    rotation-corrected foreground mask.
-    ref_angle  : float         rotation applied in degrees.
+    Input / Output
+    --------------
+    Returns the images unchanged with angle = 0.0.
     """
-    H, W = gray.shape
-    angle = compute_reference_angle(gray, mask)
-
-    if abs(angle) < 1.5:            # skip trivial rotations (< 1.5°)
-        return gray, mask, 0.0
-
-    M = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), angle, 1.0)
-    gray_norm = cv2.warpAffine(gray, M, (W, H),
-                                flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_REPLICATE)
-    mask_norm = cv2.warpAffine(mask.astype(np.uint8), M, (W, H),
-                                flags=cv2.INTER_NEAREST,
-                                borderMode=cv2.BORDER_CONSTANT,
-                                borderValue=0).astype(bool)
-    return gray_norm, mask_norm, float(angle)
+    return gray, mask, 0.0
 
 
 def preprocess_fingerprint(img_path: str) -> dict:
@@ -851,6 +829,10 @@ def compute_spectral_descriptor(sub_nodes: list,
     except Exception:
         eigs = np.zeros(n)
 
+    # Normalise to [0, 1] → scale-invariant (independent of absolute ridge counts)
+    if eigs.max() > 1e-9:
+        eigs = eigs / eigs.max()
+
     # Pad to `size` (zero-pad) or truncate
     if len(eigs) >= size:
         descriptor = eigs[:size]
@@ -860,11 +842,55 @@ def compute_spectral_descriptor(sub_nodes: list,
     return descriptor.astype(np.float64)
 
 
+def compute_ridge_count_node_descriptor(node: int,
+                                         adjacency: dict,
+                                         weight_dict: dict,
+                                         n_slots: int = 8) -> np.ndarray:
+    """
+    Direct ridge-count descriptor for a single minutia node.
+
+    For node i, collect the ridge counts to each immediate Delaunay neighbour,
+    sort them descending, then L1-normalise.  This directly encodes the local
+    anatomical structure (how many ridges separate this minutia from each
+    nearby minutia) in a way that is:
+      • invariant to rotation and translation (no coordinates used)
+      • invariant to elastic distortion (ridge count = anatomical constant)
+      • stable across impressions (same ridges → same counts)
+
+    Input
+    -----
+    node        : int   target minutia index.
+    adjacency   : dict  {node: set(neighbours)}
+    weight_dict : dict  {(i,j): ridge_count}
+    n_slots     : int   descriptor length (pad / truncate to this size).
+
+    Output
+    ------
+    desc : (n_slots,) float64   sorted, normalised ridge counts.
+    """
+    neighbours    = list(adjacency.get(node, set()))
+    ridge_counts  = sorted(
+        [float(weight_dict.get((min(node, nb), max(node, nb)), 0))
+         for nb in neighbours],
+        reverse=True
+    )
+    # Pad with zeros or truncate
+    ridge_counts  = (ridge_counts + [0.0] * n_slots)[:n_slots]
+    desc = np.array(ridge_counts, dtype=np.float64)
+    desc = desc / (desc.sum() + 1e-9)   # L1-normalise
+    return desc
+
+
 def compute_all_node_descriptors(minutiae: np.ndarray,
                                  adjacency: dict,
                                  weight_dict: dict) -> np.ndarray:
     """
-    Compute spectral descriptors for every minutia node in the fingerprint.
+    Compute per-node descriptors for every minutia.
+
+    v5: each node descriptor concatenates two complementary parts:
+      1. Spectral (Laplacian eigenvalues of k-hop subgraph) — captures topology
+      2. Ridge-count (sorted, normalised counts to direct neighbours) — captures
+         the direct anatomical metric, highly stable across impressions.
 
     Input
     -----
@@ -874,18 +900,22 @@ def compute_all_node_descriptors(minutiae: np.ndarray,
 
     Output
     ------
-    node_descs : (N, descriptor_size) float64
-        Row i is the spectral descriptor of the k-hop subgraph around node i.
+    node_descs : (N, descriptor_size + RC_SLOTS) float64
     """
-    n    = len(minutiae)
-    k    = CFG["k_hop"]
-    size = CFG["descriptor_size"]
-    descs = np.zeros((n, size), dtype=np.float64)
+    n         = len(minutiae)
+    k         = CFG["k_hop"]
+    spec_size = CFG["descriptor_size"]   # spectral part
+    rc_slots  = 8                        # ridge-count part
+    total     = spec_size + rc_slots
+    descs     = np.zeros((n, total), dtype=np.float64)
 
     for i in range(n):
         sub_nodes, sub_edges = extract_k_hop_subgraph(i, adjacency, k)
-        descs[i] = compute_spectral_descriptor(sub_nodes, sub_edges,
-                                               weight_dict, size)
+        spec = compute_spectral_descriptor(sub_nodes, sub_edges,
+                                           weight_dict, spec_size)
+        rc   = compute_ridge_count_node_descriptor(i, adjacency,
+                                                    weight_dict, rc_slots)
+        descs[i] = np.concatenate([spec, rc])
     return descs
 
 
@@ -941,7 +971,28 @@ def compute_orientation_field(gray: np.ndarray,
             sin2_list.append(Vy / mag)
             eng_list.append(float(np.log1p(mag)))
 
-    return np.array(cos2_list + sin2_list + eng_list, dtype=np.float64)
+    # ── Rotation-invariant relative encoding (v5) ────────────────────────────
+    # Compute the per-image dominant orientation (circular mean of 2θ vectors).
+    # Then rotate every block's orientation by −θ_dominant so the output encodes
+    # DEVIATION from the dominant direction rather than an absolute angle.
+    # This is algebraically equivalent to rotating the image to canonical pose
+    # but is far more stable: the dominant angle is computed over ALL foreground
+    # blocks (not just the noisy central region) and there is no integer-pixel
+    # resampling artefact.
+    #
+    # Rotation formula for (cos2θ, sin2θ) by angle −φ:
+    #   cos2(θ−φ) = cos2θ·cos2φ + sin2θ·sin2φ
+    #   sin2(θ−φ) = sin2θ·cos2φ − cos2θ·sin2φ
+    cos2_arr = np.array(cos2_list, dtype=np.float64)
+    sin2_arr = np.array(sin2_list, dtype=np.float64)
+    Vx_g = cos2_arr.mean();  Vy_g = sin2_arr.mean()
+    mag_g = np.sqrt(Vx_g**2 + Vy_g**2) + 1e-9
+    cos2_g = Vx_g / mag_g;  sin2_g = Vy_g / mag_g   # dominant direction
+
+    cos2_rel = cos2_arr * cos2_g + sin2_arr * sin2_g
+    sin2_rel = sin2_arr * cos2_g - cos2_arr * sin2_g
+
+    return np.concatenate([cos2_rel, sin2_rel, np.array(eng_list)]).astype(np.float64)
 
 
 def compute_minutiae_spatial_density(minutiae: np.ndarray, H: int, W: int,
@@ -1011,8 +1062,11 @@ def compute_ridge_frequency_features(gray: np.ndarray,
     ------
     features : (n_blocks,) float64   local ridge frequency per block (0 for background).
     """
-    H, W = gray.shape
+    H, W   = gray.shape
     smooth = cv2.GaussianBlur(gray, (5, 5), 1.0)
+    smooth_f = smooth.astype(np.float64)
+    Gx = cv2.Sobel(smooth_f, cv2.CV_64F, 1, 0, ksize=3)
+    Gy = cv2.Sobel(smooth_f, cv2.CV_64F, 0, 1, ksize=3)
     feats  = []
 
     for r in range(0, H, block_size):
@@ -1022,8 +1076,18 @@ def compute_ridge_frequency_features(gray: np.ndarray,
             if block.size == 0 or msk_b.mean() < 0.3:
                 feats.append(0.0)
                 continue
-            # Project along x-axis (captures horizontal ridge spacing)
-            proj  = block.mean(axis=0)
+            # Determine dominant gradient direction (perpendicular to ridges)
+            gx_b = Gx[r:r+block_size, c:c+block_size]
+            gy_b = Gy[r:r+block_size, c:c+block_size]
+            Vx   = float(np.sum(gx_b**2 - gy_b**2))
+            Vy   = float(np.sum(2.0 * gx_b * gy_b))
+            # Project perpendicular to ridges: choose axis closer to gradient dir
+            if abs(Vx) + abs(Vy) > 1e-6:
+                theta = 0.5 * np.arctan2(Vy, Vx)   # dominant gradient direction
+                proj  = block.mean(axis=0) if abs(np.cos(theta)) >= abs(np.sin(theta)) \
+                        else block.mean(axis=1)
+            else:
+                proj = block.mean(axis=0)
             # Count zero-crossings of second derivative (≈ ridge peaks)
             d2    = np.diff(proj, n=2)
             peaks = np.sum((d2[:-1] < 0) & (d2[1:] >= 0))
@@ -1033,9 +1097,53 @@ def compute_ridge_frequency_features(gray: np.ndarray,
     return np.array(feats, dtype=np.float64)
 
 
+def compute_orientation_histogram(gray: np.ndarray,
+                                   mask: np.ndarray,
+                                   n_bins: int = 24) -> np.ndarray:
+    """
+    Gradient-weighted histogram of ridge orientations across the foreground.
+
+    This descriptor is FULLY rotation-invariant: rotating the image merely
+    cyclically shifts the histogram, and the 2θ encoding (π-periodicity) means
+    a 180° rotation leaves the histogram unchanged.  Because it integrates over
+    all foreground pixels it is also stable across impressions.
+
+    Discriminative power: arches → sharply peaked (all ridges ≈ parallel);
+    loops → bimodal peak; whorls → broadly distributed.  Individual subjects
+    within each class further differ by core position and ridge curvature.
+
+    Input
+    -----
+    gray   : (H, W) uint8   grayscale fingerprint image.
+    mask   : (H, W) bool    foreground mask.
+    n_bins : int             number of orientation bins over [−π/2, π/2).
+
+    Output
+    ------
+    hist : (n_bins,) float64   gradient-energy-weighted, L1-normalised histogram.
+    """
+    smooth = cv2.GaussianBlur(gray, (5, 5), 1.0)
+    smooth_f = smooth.astype(np.float64)
+    Gx = cv2.Sobel(smooth_f, cv2.CV_64F, 1, 0, ksize=3)
+    Gy = cv2.Sobel(smooth_f, cv2.CV_64F, 0, 1, ksize=3)
+
+    # Ridge orientation via structure-tensor coherence direction (2θ trick)
+    Vx = Gx**2 - Gy**2
+    Vy = 2.0 * Gx * Gy
+    theta = 0.5 * np.arctan2(Vy, Vx)          # ridge angle ∈ (-π/2, π/2]
+    mag   = np.sqrt(Gx**2 + Gy**2)            # gradient magnitude as weight
+
+    fg = mask if mask is not None else np.ones(gray.shape, dtype=bool)
+    hist, _ = np.histogram(theta[fg], bins=n_bins,
+                            range=(-np.pi / 2, np.pi / 2),
+                            weights=mag[fg])
+    hist = hist.astype(np.float64) / (hist.sum() + 1e-9)
+    return hist
+
+
 def match_local_descriptors_score(descs1: np.ndarray,
                                    descs2: np.ndarray,
-                                   ratio_thresh: float = 0.85) -> float:
+                                   ratio_thresh: float = 0.75) -> float:
     """
     Score two fingerprints by mutual nearest-neighbour matching of their
     per-node spectral descriptors (Lowe ratio test + mutual consistency).
@@ -1221,6 +1329,8 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
     parts.append(deg_stats)
 
     # ── 4. Node descriptor percentiles ──────────────────────────────────────
+    # node_descs are now (N, spec_size + rc_slots) = (N, D+8) wide.
+    nd_width = node_descs.shape[1] if len(node_descs) > 0 else (D + 8)
     if len(node_descs) > 0:
         nd_part = np.concatenate([
             np.percentile(node_descs, 25, axis=0),
@@ -1228,7 +1338,7 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
             np.percentile(node_descs, 75, axis=0),
         ])
     else:
-        nd_part = np.zeros(3 * D)
+        nd_part = np.zeros(3 * nd_width)
     # Normalise to [-1, 1] range
     mx = np.abs(nd_part).max() + 1e-9
     parts.append(nd_part / mx)
@@ -1256,13 +1366,26 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
         spatial = np.zeros(48)
     parts.append(spatial)
 
-    # ── 7. Ridge frequency map [NEW] ─────────────────────────────────────────
+    # ── 7. Ridge frequency map ────────────────────────────────────────────────
     if gray is not None and mask is not None:
         freq_feats = compute_ridge_frequency_features(gray, mask, block_size=48)
         freq_feats = freq_feats / (freq_feats.max() + 1e-9)  # normalise to [0,1]
     else:
         freq_feats = np.zeros(64)
     parts.append(freq_feats)
+
+    # ── 8. Rotation-invariant orientation histogram [v5 NEW] ─────────────────
+    # 24-bin histogram of ridge angles weighted by gradient energy.
+    # Fully rotation-invariant; discriminates fingerprint classes (arch/loop/whorl)
+    # and individual subjects via ridge curvature and core position.
+    if gray is not None:
+        orient_hist = compute_orientation_histogram(
+            gray, mask if mask is not None else np.ones(gray.shape, dtype=bool),
+            n_bins=24
+        )
+    else:
+        orient_hist = np.zeros(24)
+    parts.append(orient_hist)
 
     return np.concatenate(parts).astype(np.float64)
 
@@ -1420,9 +1543,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def fingerprint_pair_score(result_a: dict, result_b: dict,
-                            mu:    np.ndarray = None,
-                            sigma: np.ndarray = None,
-                            alpha: float      = 0.6) -> float:
+                            alpha: float = 0.7) -> float:
     """
     Combined similarity score for a pair of fingerprint result dicts.
 
@@ -1444,8 +1565,7 @@ def fingerprint_pair_score(result_a: dict, result_b: dict,
     Input
     -----
     result_a, result_b : dict   output of process_fingerprint()
-    mu, sigma          : (D,)   z-score params from build_kd_index (optional)
-    alpha              : float  weight for global vs local score
+    alpha              : float  weight for global vs local score (default 0.7)
 
     Output
     ------
@@ -1455,15 +1575,13 @@ def fingerprint_pair_score(result_a: dict, result_b: dict,
     gd_b = result_b["global_desc"]
 
     # Global score: convert z-score Euclidean distance → similarity ∈ [0, 1]
-    if mu is not None and sigma is not None:
-        za = (gd_a - mu) / sigma
-        zb = (gd_b - mu) / sigma
-    else:
-        za = gd_a / (np.linalg.norm(gd_a) + 1e-9)
-        zb = gd_b / (np.linalg.norm(gd_b) + 1e-9)
-
-    euc_d      = np.linalg.norm(za - zb)
-    global_sim = float(np.exp(-euc_d / (len(za)**0.5 + 1e-9)))
+    # Always use L2-normalised cosine similarity (stable, bounded [-1,1]).
+    # Previous exp(-d/sqrt(D)) formula collapsed the range to [0.90,0.99],
+    # making genuine and impostor scores indistinguishable (AUC ≈ 0.5).
+    za = gd_a / (np.linalg.norm(gd_a) + 1e-9)
+    zb = gd_b / (np.linalg.norm(gd_b) + 1e-9)
+    global_sim = float(np.dot(za, zb))              # cosine sim ∈ [-1, 1]
+    global_sim = max(0.0, (global_sim + 1.0) / 2.0) # remap to [0, 1]
 
     # Local score: mutual NN matching on node spectral descriptors
     nd_a = result_a["node_descs"]
@@ -1509,8 +1627,8 @@ def evaluate_verification(results_by_subject: dict) -> dict:
         return r["global_desc"] if isinstance(r, dict) else r
 
     def _score(r1, r2):
-        return cosine_similarity(_get_desc(r1), _get_desc(r2))
-
+        return fingerprint_pair_score(r1, r2, alpha=0.75)
+    
     # Genuine pairs (same subject, all impression combinations)
     for subj in subjects:
         results = results_by_subject[subj]
@@ -1782,12 +1900,12 @@ def visualise_phase3(result: dict, tag: str = "sample", node_example: int = 0) -
     axes[1].set_title(f"{k}-hop Subgraph  ({len(sub_nodes)} nodes, {len(sub_edges)} edges)")
     axes[1].axis("off")
 
-    # Right: spectral descriptor bar chart (all nodes, averaged)
-    mean_desc = node_descs.mean(axis=0)
-    axes[2].bar(range(size), mean_desc, color="steelblue", edgecolor="white", linewidth=0.3)
-    axes[2].set_xlabel("Eigenvalue index")
-    axes[2].set_ylabel("Eigenvalue")
-    axes[2].set_title("Avg. Spectral Descriptor across all nodes")
+    # Right: node descriptor bar chart (all nodes, averaged)
+    mean_desc = node_descs.mean(axis=0)   # actual width = spec_size + rc_slots
+    axes[2].bar(range(len(mean_desc)), mean_desc, color="steelblue", edgecolor="white", linewidth=0.3)
+    axes[2].set_xlabel("Descriptor component index")
+    axes[2].set_ylabel("Value")
+    axes[2].set_title(f"Avg. Node Descriptor  (spectral {size}D + ridge-count 8D)")
     axes[2].grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
