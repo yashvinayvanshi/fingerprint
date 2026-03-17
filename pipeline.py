@@ -2,14 +2,23 @@
 """
 ================================================================
 TRC-SD: Topological Ridge-Count Graphs with Spectral Descriptors
-Fingerprint Recognition Pipeline — DSM 410 Computer Vision
+Fingerprint Recognition Pipeline v2 — DSM 410 Computer Vision
 ================================================================
 Authors  : Bharath AS & Yash Vinayvanshi (IIT Indore)
 Course   : DSM 410 – Computer Vision
 
+v2 Fixes (applied after real-data diagnosis):
+    FIX-1  binarize()               Gabor abs() → signed Gabor + CLAHE + adaptive
+                                     threshold.  Produces thin ridge lines, not blobs.
+    FIX-2  compute_foreground_mask() New: segments fingerprint area from background
+                                     using local-variance map.
+    FIX-3  fingerprint_global_desc() [mean,std] → 4-component rich vector:
+                                     global Laplacian spectrum + ridge-count histogram
+                                     + degree distribution + node-descriptor percentiles.
+
 Pipeline Phases:
     Phase 1.1  →  Preprocessing & Minutiae Extraction
-                  (Gabor enhancement → Binarise → Skeletonise → CN method)
+                  (Gabor/CLAHE enhancement → adaptive binarise → Skeletonise → CN method)
     Phase 1.2  →  Delaunay Triangulation (Graph Construction)
     Phase 2    →  Ridge-Count Edge Weighting
                   (Bresenham line scan on binary image)
@@ -187,62 +196,122 @@ def load_dataset(dataset_dir: str) -> dict:
 # PHASE 1.1 – PREPROCESSING & MINUTIAE EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def enhance_with_gabor(gray: np.ndarray) -> np.ndarray:
+def compute_foreground_mask(gray: np.ndarray) -> np.ndarray:
     """
-    Enhance fingerprint ridges with a bank of Gabor filters.
+    Compute a binary foreground mask for the fingerprint area.
+    Ridge regions have high local variance; blank background has near-zero variance.
 
     Input
     -----
-    gray : (H, W) uint8   Raw grayscale fingerprint image.
+    gray : (H, W) uint8   Raw grayscale fingerprint.
 
     Output
     ------
-    enhanced : (H, W) uint8   Ridge-enhanced image (higher contrast ridges).
+    mask : (H, W) bool   True = fingerprint foreground.
     """
+    gray_f  = gray.astype(np.float32)
+    mean    = cv2.blur(gray_f, (25, 25))
+    mean_sq = cv2.blur(gray_f * gray_f, (25, 25))
+    var     = np.maximum(mean_sq - mean * mean, 0)
+    # Normalise variance to uint8 for Otsu
+    var_u8  = cv2.normalize(var, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, mask = cv2.threshold(var_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask    = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel, iterations=1)
+    return mask.astype(bool)
+
+
+def enhance_with_gabor(gray: np.ndarray) -> np.ndarray:
+    """
+    Enhance fingerprint ridges with a bank of oriented Gabor filters.
+
+    FIX (v2): The original used abs(response) which made the entire fingerprint
+    area uniformly bright.  We now:
+      1.  Invert the grayscale so ridges (originally dark) become bright peaks.
+      2.  Apply CLAHE to normalise local ridge/furrow contrast.
+      3.  Take the SIGNED maximum Gabor response — ridges give a large positive
+          response while furrows give negative, preserving the thin-stripe structure.
+
+    Input
+    -----
+    gray : (H, W) uint8   Raw grayscale fingerprint (dark ridges, light bg).
+
+    Output
+    ------
+    enhanced : (H, W) uint8   Ridge-enhanced image; individual ridges are bright.
+    """
+    # Step 1: invert (ridges dark -> bright) + local contrast normalisation
+    inv   = 255 - gray
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    norm  = clahe.apply(inv)
+
     n_orient = CFG["gabor_orientations"]
-    ksize    = 31                          # kernel size (odd)
+    ksize    = 21
     freq     = CFG["gabor_frequency"]
     sx       = CFG["gabor_sigma_x"]
     sy       = CFG["gabor_sigma_y"]
 
-    # Normalise input
-    norm = cv2.normalize(gray.astype(np.float32), None, 0, 1,
-                         cv2.NORM_MINMAX)
+    norm_f   = norm.astype(np.float32) / 255.0
+    # Start at -inf so the first orientation always overwrites
+    response = np.full_like(norm_f, -1e9)
 
-    response = np.zeros_like(norm)
     for i in range(n_orient):
-        theta = (i / n_orient) * np.pi
+        theta  = (i / n_orient) * np.pi
         kernel = cv2.getGaborKernel(
-            (ksize, ksize), sx, theta,
-            1.0 / freq, sy / sx, 0, ktype=cv2.CV_32F
+            (ksize, ksize), sx, theta, 1.0 / freq, sy / sx, 0,
+            ktype=cv2.CV_32F
         )
-        kernel /= (kernel.sum() + 1e-6)
-        filt = cv2.filter2D(norm, cv2.CV_32F, kernel)
-        response = np.maximum(response, np.abs(filt))
+        filt   = cv2.filter2D(norm_f, cv2.CV_32F, kernel)
+        # Signed max: ridges get positive response, furrows negative
+        response = np.maximum(response, filt)
 
     enhanced = cv2.normalize(response, None, 0, 255, cv2.NORM_MINMAX)
     return enhanced.astype(np.uint8)
 
 
-def binarize(enhanced: np.ndarray) -> np.ndarray:
+def binarize(enhanced: np.ndarray, mask: np.ndarray = None) -> np.ndarray:
     """
-    Binarize the enhanced image using adaptive thresholding.
+    Binarize the Gabor-enhanced image to extract individual ridge lines.
+
+    FIX (v2): Replaced global Otsu with adaptive Gaussian thresholding.
+    Global Otsu caused the entire fingerprint area to become one white blob
+    because the Gabor response is high everywhere in the ridge region.
+    Adaptive thresholding operates at the scale of individual ridges and
+    correctly isolates each thin ridge line.
 
     Input
     -----
-    enhanced : (H, W) uint8   Gabor-enhanced fingerprint.
+    enhanced : (H, W) uint8   Gabor-enhanced image (ridges = bright).
+    mask     : (H, W) bool    Optional foreground mask; background zeroed out.
 
     Output
     ------
-    binary : (H, W) bool   True = ridge pixel.
+    binary : (H, W) bool   True = ridge pixel (thin, individual ridge lines).
     """
-    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255,
-                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # Morphological clean-up: close small holes, remove specks
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  kernel, iterations=1)
+    # Block size ≈ 2x inter-ridge spacing; FVC2002 ridges ~8-12 px apart
+    block_size = 25   # must be odd
+    C          = -3   # subtract from local mean; negative keeps bright ridges
+
+    binary = cv2.adaptiveThreshold(
+        enhanced, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        block_size, C
+    )
+
+    # Remove isolated noise pixels
+    k_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    binary  = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k_cross, iterations=1)
+
+    # Mask out background region
+    if mask is not None:
+        binary[~mask] = 0
+
+    # Light erosion to separate touching ridges (improves skeleton quality)
+    k_thin = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    binary = cv2.erode(binary, k_thin, iterations=1)
+
     return binary.astype(bool)
 
 
@@ -399,7 +468,8 @@ def preprocess_fingerprint(img_path: str) -> dict:
         return None
 
     enhanced = enhance_with_gabor(img)
-    binary   = binarize(enhanced)
+    mask     = compute_foreground_mask(img)      # FIX v2: segment fg first
+    binary   = binarize(enhanced, mask)           # FIX v2: adaptive + masked
     skeleton = compute_skeleton(binary)
     minutiae, types = extract_minutiae(skeleton)
 
@@ -410,6 +480,7 @@ def preprocess_fingerprint(img_path: str) -> dict:
     return {
         "gray"     : img,
         "enhanced" : enhanced,
+        "mask"     : mask,
         "binary"   : binary,
         "skeleton" : skeleton,
         "minutiae" : minutiae,
@@ -706,26 +777,122 @@ def compute_all_node_descriptors(minutiae: np.ndarray,
     return descs
 
 
-def fingerprint_global_descriptor(node_descs: np.ndarray) -> np.ndarray:
+def compute_global_laplacian_spectrum(edges: np.ndarray,
+                                      n_nodes: int,
+                                      weight_dict: dict,
+                                      size: int = 50) -> np.ndarray:
     """
-    Aggregate per-node spectral descriptors into a single fingerprint vector.
+    Compute the sorted eigenvalue spectrum of the FULL graph Laplacian.
+    This captures the global topology of the entire fingerprint graph.
 
-    Representation: concatenation of [mean, std] across all node descriptors.
-    This produces a (2 * descriptor_size,) vector used for KD-tree indexing.
+    FIX v2 (new component): The original global descriptor used only [mean, std]
+    of local node descriptors, which is nearly identical across all fingerprints.
+    The full graph Laplacian spectrum encodes the holistic connectivity structure.
 
     Input
     -----
-    node_descs : (N, D) float64
+    edges       : (E, 2) int   full edge list
+    n_nodes     : int          total number of nodes
+    weight_dict : dict         {(i,j): ridge_count}
+    size        : int          number of eigenvalues to return
 
     Output
     ------
-    global_vec : (2D,) float64
+    spectrum : (size,) float64   sorted eigenvalues, padded/truncated to `size`
     """
-    if len(node_descs) == 0:
-        return np.zeros(2 * CFG["descriptor_size"])
-    mu  = node_descs.mean(axis=0)
-    sig = node_descs.std(axis=0)
-    return np.concatenate([mu, sig])
+    n = n_nodes
+    A = np.zeros((n, n), dtype=float)
+    for (i, j) in edges:
+        w = float(weight_dict.get((min(i,j), max(i,j)), 1))
+        A[i, j] += w
+        A[j, i] += w
+    D   = np.diag(A.sum(axis=1))
+    L   = D - A
+    try:
+        eigs = np.sort(np.abs(eigvalsh(L)))
+    except Exception:
+        eigs = np.zeros(n)
+    if len(eigs) >= size:
+        return eigs[:size].astype(np.float64)
+    return np.pad(eigs, (0, size - len(eigs))).astype(np.float64)
+
+
+def fingerprint_global_descriptor(node_descs:  np.ndarray,
+                                   edges:       np.ndarray       = None,
+                                   n_nodes:     int              = 0,
+                                   weight_dict: dict             = None,
+                                   weights:     np.ndarray       = None,
+                                   adjacency:   dict             = None) -> np.ndarray:
+    """
+    Build a rich, discriminative global fingerprint descriptor.
+
+    FIX v2: The original [mean, std] of node eigenvalues caused ALL fingerprints
+    to have cosine similarity ≈ 1.0 (descriptor collapse).  The new descriptor
+    combines FOUR complementary components:
+
+      1. Global Laplacian spectrum (50 dims) — holistic graph topology.
+      2. Ridge-count histogram    (12 bins)  — local ridge density distribution.
+      3. Node degree distribution ( 8 stats) — connectivity richness.
+      4. Node descriptor percentiles (3×D)   — distribution of local spectra.
+
+    Together these give a ~130-dimensional vector with much higher between-subject
+    variance and lower within-subject variance.
+
+    Input
+    -----
+    node_descs  : (N, D) float64   per-node spectral descriptors
+    edges       : (E, 2) int       full edge list
+    n_nodes     : int              number of graph nodes
+    weight_dict : dict             {(i,j): ridge_count}
+    weights     : (E,) int         ridge counts per edge
+    adjacency   : dict             {node: set(neighbours)}
+
+    Output
+    ------
+    global_vec : (130+,) float64
+    """
+    D = CFG["descriptor_size"]
+    parts = []
+
+    # ── Component 1: Global Laplacian spectrum (50 dims) ─────────────────────
+    if edges is not None and n_nodes > 0 and weight_dict is not None:
+        spec = compute_global_laplacian_spectrum(edges, n_nodes, weight_dict, size=50)
+    else:
+        spec = np.zeros(50)
+    parts.append(spec)
+
+    # ── Component 2: Ridge-count histogram (12 bins, counts 1–12) ───────────
+    if weights is not None and len(weights) > 0:
+        bins     = np.arange(1, 14) - 0.5          # bins: [0.5,1.5,…,13.5]
+        hist, _  = np.histogram(weights, bins=bins)
+        hist_f   = hist.astype(float) / (hist.sum() + 1e-9)
+    else:
+        hist_f = np.zeros(13)
+    parts.append(hist_f)
+
+    # ── Component 3: Node-degree distribution (8 stats) ─────────────────────
+    if adjacency is not None and len(adjacency) > 0:
+        degrees = np.array([len(nbrs) for nbrs in adjacency.values()], dtype=float)
+        deg_stats = np.array([
+            degrees.min(), degrees.max(), degrees.mean(), degrees.std(),
+            np.percentile(degrees, 25), np.percentile(degrees, 50),
+            np.percentile(degrees, 75), np.percentile(degrees, 90),
+        ])
+    else:
+        deg_stats = np.zeros(8)
+    parts.append(deg_stats)
+
+    # ── Component 4: Node descriptor percentiles (p25/p50/p75 per dim) ──────
+    if len(node_descs) > 0:
+        p25 = np.percentile(node_descs, 25, axis=0)
+        p50 = np.percentile(node_descs, 50, axis=0)
+        p75 = np.percentile(node_descs, 75, axis=0)
+        nd_part = np.concatenate([p25, p50, p75])   # (3D,)
+    else:
+        nd_part = np.zeros(3 * D)
+    parts.append(nd_part)
+
+    return np.concatenate(parts).astype(np.float64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -770,7 +937,15 @@ def process_fingerprint(img_path: str) -> dict | None:
 
     # Phase 3
     node_descs  = compute_all_node_descriptors(minutiae, adjacency, weight_dict)
-    global_desc = fingerprint_global_descriptor(node_descs)
+    # FIX v2: pass all graph components for rich global descriptor
+    global_desc = fingerprint_global_descriptor(
+        node_descs,
+        edges       = edges,
+        n_nodes     = len(minutiae),
+        weight_dict = weight_dict,
+        weights     = weights,
+        adjacency   = adjacency,
+    )
 
     return {
         "path"        : img_path,
@@ -1008,8 +1183,9 @@ def visualise_phase1_1(result: dict, tag: str = "sample") -> None:
     fig.suptitle("Phase 1.1 – Preprocessing & Minutiae Extraction", fontsize=13, y=1.01)
 
     axes[0].imshow(prep["gray"],     cmap="gray"); axes[0].set_title("1. Raw Grayscale")
-    axes[1].imshow(prep["enhanced"], cmap="gray"); axes[1].set_title("2. Gabor Enhanced")
-    axes[2].imshow(prep["binary"],   cmap="gray"); axes[2].set_title("3. Binarised Ridges")
+    axes[1].imshow(prep["enhanced"], cmap="gray"); axes[1].set_title("2. Gabor Enhanced (v2)")
+    # Binary now shows individual ridge lines, not a blob (FIX v2)
+    axes[2].imshow(prep["binary"],   cmap="gray"); axes[2].set_title("3. Binarised Ridges (v2)")
     axes[3].imshow(prep["skeleton"], cmap="gray"); axes[3].set_title("4. Skeleton")
 
     # Overlay minutiae on skeleton
