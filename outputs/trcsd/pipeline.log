@@ -1,0 +1,114 @@
+22:37:39  INFO      =================================================================
+22:37:39  INFO        TRC-SD Fingerprint Recognition Pipeline
+22:37:39  INFO        DSM 410 – Computer Vision | IIT Indore
+22:37:39  INFO      =================================================================
+22:37:39  INFO      
+[Phase 0]  Loading FVC2002 dataset …
+22:37:39  INFO        DB1_B: 10 subjects, 80 images
+22:37:39  INFO        DB2_B: 10 subjects, 80 images
+22:37:39  INFO        DB3_B: 10 subjects, 80 images
+22:37:39  INFO        DB4_B: 10 subjects, 80 images
+22:37:39  INFO        Loaded 4 databases: ['DB1_B', 'DB2_B', 'DB3_B', 'DB4_B']
+22:37:39  INFO      
+────────────────────────────────────────────────────────────
+22:37:39  INFO        Database: DB1_B  |  10 subjects
+22:37:39  INFO      ────────────────────────────────────────────────────────────
+22:37:39  INFO      
+[Phase 1-3]  Feature extraction …
+22:37:39  INFO      
+  Saving pipeline visualisations for: 101_1.tif
+22:37:40  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_1_preprocessing.png
+22:37:40  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase1_2_delaunay.png
+22:37:41  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase2_ridge_weights.png
+22:37:42  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase3_spectral.png
+22:37:42  INFO      
+22:37:51  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+22:37:51  INFO      
+[Phase 4 / Eval]  Verification …
+22:37:51  INFO        Genuine pairs   : 280
+22:37:51  INFO        Impostor pairs  : 45
+22:37:51  INFO        EER             : 54.23%  (threshold=0.997)
+22:37:51  INFO        FNMR @ FMR=0.1%: 100.00%
+22:37:51  INFO        AUC             : 0.4590
+22:37:51  INFO          Saved: outputs/trcsd/sample_vis/DB1_B_phase4_evaluation.png
+22:37:51  INFO      
+[Phase 4]  Identification (Rank-1) …
+22:37:51  INFO        Rank-1 accuracy  : 11.43%
+22:37:51  INFO        Rank-5 accuracy  : 61.43%
+22:37:51  INFO        KD-tree query time (all queries): 4.4 ms  → 0.06 ms/query
+22:37:51  INFO      
+────────────────────────────────────────────────────────────
+22:37:51  INFO        Database: DB2_B  |  10 subjects
+22:37:51  INFO      ────────────────────────────────────────────────────────────
+22:37:51  INFO      
+[Phase 1-3]  Feature extraction …
+22:38:03  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+22:38:03  INFO      
+[Phase 4 / Eval]  Verification …
+22:38:03  INFO        Genuine pairs   : 280
+22:38:03  INFO        Impostor pairs  : 45
+22:38:03  INFO        EER             : 37.72%  (threshold=0.997)
+22:38:03  INFO        FNMR @ FMR=0.1%: 100.00%
+22:38:03  INFO        AUC             : 0.6083
+22:38:03  INFO          Saved: outputs/trcsd/sample_vis/DB2_B_phase4_evaluation.png
+22:38:03  INFO      
+[Phase 4]  Identification (Rank-1) …
+22:38:03  INFO        Rank-1 accuracy  : 14.29%
+22:38:03  INFO        Rank-5 accuracy  : 50.00%
+22:38:03  INFO        KD-tree query time (all queries): 3.5 ms  → 0.05 ms/query
+22:38:03  INFO      
+────────────────────────────────────────────────────────────
+22:38:03  INFO        Database: DB3_B  |  10 subjects
+22:38:03  INFO      ────────────────────────────────────────────────────────────
+22:38:03  INFO      
+[Phase 1-3]  Feature extraction …
+22:38:11  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+22:38:11  INFO      
+[Phase 4 / Eval]  Verification …
+22:38:11  INFO        Genuine pairs   : 280
+22:38:11  INFO        Impostor pairs  : 45
+22:38:11  INFO        EER             : 47.18%  (threshold=0.997)
+22:38:11  INFO        FNMR @ FMR=0.1%: 100.00%
+22:38:11  INFO        AUC             : 0.5263
+22:38:11  INFO          Saved: outputs/trcsd/sample_vis/DB3_B_phase4_evaluation.png
+22:38:11  INFO      
+[Phase 4]  Identification (Rank-1) …
+22:38:11  INFO        Rank-1 accuracy  : 17.14%
+22:38:11  INFO        Rank-5 accuracy  : 51.43%
+22:38:11  INFO        KD-tree query time (all queries): 3.7 ms  → 0.05 ms/query
+22:38:11  INFO      
+────────────────────────────────────────────────────────────
+22:38:11  INFO        Database: DB4_B  |  10 subjects
+22:38:11  INFO      ────────────────────────────────────────────────────────────
+22:38:11  INFO      
+[Phase 1-3]  Feature extraction …
+22:38:19  INFO        Processed: 80 / 80  (skipped 0 with too few minutiae)
+22:38:19  INFO      
+[Phase 4 / Eval]  Verification …
+22:38:19  INFO        Genuine pairs   : 280
+22:38:19  INFO        Impostor pairs  : 45
+22:38:19  INFO        EER             : 52.24%  (threshold=0.997)
+22:38:19  INFO        FNMR @ FMR=0.1%: 100.00%
+22:38:19  INFO        AUC             : 0.4776
+22:38:20  INFO          Saved: outputs/trcsd/sample_vis/DB4_B_phase4_evaluation.png
+22:38:20  INFO      
+[Phase 4]  Identification (Rank-1) …
+22:38:20  INFO        Rank-1 accuracy  : 18.57%
+22:38:20  INFO        Rank-5 accuracy  : 62.86%
+22:38:20  INFO        KD-tree query time (all queries): 3.8 ms  → 0.05 ms/query
+22:38:20  INFO      
+═════════════════════════════════════════════════════════════════
+22:38:20  INFO        VALIDATION RESULTS SUMMARY
+22:38:20  INFO      ═════════════════════════════════════════════════════════════════
+22:38:20  INFO        Database      #Images      EER    FNMR@0.1%      AUC    Rank-1    Rank-5
+22:38:20  INFO        -------------------------------------------------------------------
+22:38:20  INFO        DB1_B              80   54.23%      100.00%   0.4590    11.43%    61.43%
+22:38:20  INFO        DB2_B              80   37.72%      100.00%   0.6083    14.29%    50.00%
+22:38:20  INFO        DB3_B              80   47.18%      100.00%   0.5263    17.14%    51.43%
+22:38:20  INFO        DB4_B              80   52.24%      100.00%   0.4776    18.57%    62.86%
+22:38:20  INFO      
+  Total wall-clock time : 40.8 s
+22:38:20  INFO        Outputs saved to      : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd
+22:38:20  INFO        Sample visualisations : /Users/yashvinayvanshi/Desktop/fingerprint/outputs/trcsd/sample_vis
+22:38:20  INFO      ═════════════════════════════════════════════════════════════════
+
