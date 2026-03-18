@@ -496,6 +496,69 @@ def extract_minutiae(skeleton: np.ndarray) -> tuple:
     return np.array(all_coords, dtype=int), np.array(all_types)
 
 
+def compute_minutiae_orientations(skeleton: np.ndarray,
+                                   minutiae: np.ndarray,
+                                   enhanced: np.ndarray = None) -> np.ndarray:
+    """
+    Compute the ridge orientation angle at each minutia from the skeleton.
+
+    WHY THIS MATTERS: Every state-of-the-art fingerprint matching system uses
+    the (x, y, θ) triplet per minutia. Without θ, two minutiae with similar
+    local topology but different ridge directions are treated as identical,
+    inflating false-match rates. Adding orientation turns 40D node descriptors
+    into far more discriminative 42D ones and enables orientation-consistency
+    checks during matching.
+
+    Method:
+        For each minutia pixel in the skeleton:
+        – Identify all 8-connected skeleton neighbours.
+        – Compute the angle of each neighbour relative to the minutia.
+        – Take the double-angle circular mean of those angles (π-periodic).
+        Fallback: if the skeleton neighbourhood is empty, use the gradient
+        structure tensor of the local enhanced-image patch.
+
+    Input
+    -----
+    skeleton  : (H, W) uint8   1-pixel-wide skeleton.
+    minutiae  : (N, 2) int     [y, x] minutia coordinates.
+    enhanced  : (H, W) float   Gabor-enhanced image (optional fallback).
+
+    Output
+    ------
+    angles : (N,) float64   Ridge direction ∈ [0, π).
+    """
+    h, w = skeleton.shape
+    dy_nbr = [-1, -1,  0,  1,  1,  1,  0, -1]
+    dx_nbr = [ 0,  1,  1,  1,  0, -1, -1, -1]
+
+    angles = np.zeros(len(minutiae), dtype=np.float64)
+
+    for idx, (y, x) in enumerate(minutiae):
+        y, x = int(y), int(x)
+        branch_dirs = []
+        for dy, dx in zip(dy_nbr, dx_nbr):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w and skeleton[ny, nx] > 0:
+                branch_dirs.append(np.arctan2(float(dy), float(dx)))
+
+        if branch_dirs:
+            cos2 = np.array([np.cos(2 * a) for a in branch_dirs])
+            sin2 = np.array([np.sin(2 * a) for a in branch_dirs])
+            angles[idx] = 0.5 * np.arctan2(sin2.mean(), cos2.mean()) % np.pi
+        elif enhanced is not None:
+            r0, r1 = max(0, y - 10), min(h, y + 10)
+            c0, c1 = max(0, x - 10), min(w, x + 10)
+            patch = enhanced[r0:r1, c0:c1].astype(np.float64)
+            if patch.size > 4:
+                gx = cv2.Sobel(patch, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(patch, cv2.CV_64F, 0, 1, ksize=3)
+                Vx = float((gx ** 2 - gy ** 2).sum())
+                Vy = float((2 * gx * gy).sum())
+                angles[idx] = 0.5 * np.arctan2(Vy, Vx) % np.pi
+
+    return angles
+
+
 def compute_reference_angle(gray: np.ndarray, mask: np.ndarray) -> float:
     """
     Estimate the dominant ridge orientation in the fingerprint central region
@@ -617,17 +680,21 @@ def preprocess_fingerprint(img_path: str) -> dict:
         log.debug(f"Too few minutiae ({len(minutiae)}) in {img_path}")
         return None
 
+    # v6: Extract ridge orientation at each minutia (critical missing feature)
+    orientations = compute_minutiae_orientations(skeleton, minutiae, enhanced)
+
     return {
-        "gray"      : img_norm,     # v4: orientation-normalised image
-        "gray_orig" : img,          # v4: original un-rotated image
-        "ref_angle" : angle,        # v4: rotation applied (degrees)
-        "enhanced"  : enhanced,
-        "mask"      : mask,
-        "binary"    : binary,
-        "skeleton"  : skeleton,
-        "minutiae"  : minutiae,
-        "types"     : types,
-        "path"      : img_path,
+        "gray"         : img_norm,
+        "gray_orig"    : img,
+        "ref_angle"    : angle,
+        "enhanced"     : enhanced,
+        "mask"         : mask,
+        "binary"       : binary,
+        "skeleton"     : skeleton,
+        "minutiae"     : minutiae,
+        "types"        : types,
+        "orientations" : orientations,   # v6 NEW: (N,) ridge angles in [0,π)
+        "path"         : img_path,
     }
 
 
@@ -936,31 +1003,54 @@ def compute_ridge_count_node_descriptor(node: int,
 
 def compute_all_node_descriptors(minutiae: np.ndarray,
                                  adjacency: dict,
-                                 weight_dict: dict) -> np.ndarray:
+                                 weight_dict: dict,
+                                 orientations: np.ndarray = None) -> np.ndarray:
     """
     Compute per-node descriptors for every minutia.
 
-    v5: each node descriptor concatenates two complementary parts:
-      1. Spectral (Laplacian eigenvalues of k-hop subgraph) — captures topology
-      2. Ridge-count (sorted, normalised counts to direct neighbours) — captures
-         the direct anatomical metric, highly stable across impressions.
+    v6: each node descriptor concatenates THREE complementary parts:
+      1. Spectral  (32D) — Laplacian eigenvalues of k-hop subgraph: captures topology.
+      2. Ridge-cnt  (8D) — sorted, L1-normalised ridge counts to direct neighbours.
+      3. Orientation(2D) — (sin(2θ_rel), cos(2θ_rel)) relative to the fingerprint's
+                           global dominant direction.  Adds rotation-invariant angle
+                           information that the spectral part completely ignores, making
+                           descriptors for different ridge directions distinguishable.
+
+    Total: 42D per node (up from 40D).
 
     Input
     -----
-    minutiae    : (N, 2) int
-    adjacency   : dict {node: set(neighbours)}
-    weight_dict : dict {(i,j): ridge_count}
+    minutiae     : (N, 2) int
+    adjacency    : dict {node: set(neighbours)}
+    weight_dict  : dict {(i,j): ridge_count}
+    orientations : (N,) float64   ridge angles ∈ [0,π) — from compute_minutiae_orientations
 
     Output
     ------
-    node_descs : (N, descriptor_size + RC_SLOTS) float64
+    node_descs : (N, 42) float64
     """
     n         = len(minutiae)
     k         = CFG["k_hop"]
-    spec_size = CFG["descriptor_size"]   # spectral part
-    rc_slots  = 8                        # ridge-count part
-    total     = spec_size + rc_slots
+    spec_size = CFG["descriptor_size"]   # 32
+    rc_slots  = 8
+    ori_slots = 2                        # sin(2θ_rel), cos(2θ_rel)
+    total     = spec_size + rc_slots + ori_slots   # 42
     descs     = np.zeros((n, total), dtype=np.float64)
+
+    # Pre-compute rotation-invariant orientation encoding
+    # Subtract the global dominant direction so the encoding is invariant to
+    # the absolute orientation of the finger on the sensor.
+    if orientations is not None and len(orientations) == n:
+        cos2_all = np.cos(2 * orientations)
+        sin2_all = np.sin(2 * orientations)
+        Vx_g = cos2_all.mean(); Vy_g = sin2_all.mean()
+        mag_g = np.sqrt(Vx_g ** 2 + Vy_g ** 2) + 1e-9
+        cos2_g = Vx_g / mag_g; sin2_g = Vy_g / mag_g
+        # Rotate each orientation by −θ_global (double-angle subtraction formula)
+        cos2_rel = cos2_all * cos2_g + sin2_all * sin2_g
+        sin2_rel = sin2_all * cos2_g - cos2_all * sin2_g
+    else:
+        cos2_rel = np.zeros(n); sin2_rel = np.zeros(n)
 
     for i in range(n):
         sub_nodes, sub_edges = extract_k_hop_subgraph(i, adjacency, k)
@@ -968,7 +1058,8 @@ def compute_all_node_descriptors(minutiae: np.ndarray,
                                            weight_dict, spec_size)
         rc   = compute_ridge_count_node_descriptor(i, adjacency,
                                                     weight_dict, rc_slots)
-        descs[i] = np.concatenate([spec, rc])
+        ori  = np.array([cos2_rel[i], sin2_rel[i]], dtype=np.float64)
+        descs[i] = np.concatenate([spec, rc, ori])
     return descs
 
 
@@ -1194,6 +1285,137 @@ def compute_orientation_histogram(gray: np.ndarray,
     return hist
 
 
+def compute_minutiae_triplet_descriptor(minutiae: np.ndarray,
+                                         n_nbrs: int = 5,
+                                         n_angle_bins: int = 18,
+                                         n_ratio_bins: int = 10) -> np.ndarray:
+    """
+    Rotation + translation + scale invariant global descriptor built from
+    minutiae triplets.
+
+    WHY THIS WORKS: The internal angles of any triangle are invariant to
+    rotation, translation, and uniform scale. Different fingerprints have
+    different spatial arrangements of minutiae → different typical triangle
+    shapes → different angle distributions. Same subject across impressions
+    → similar triangle shapes → similar angle distributions.
+
+    Real biometric systems (e.g., MCC) exploit exactly this property.
+
+    Algorithm:
+        For each minutia i, find its (n_nbrs − 1) spatial nearest neighbours.
+        For each pair (j, k) of those neighbours, form the triangle (i, j, k).
+        Compute the 3 internal angles (law of cosines).
+        Bin the smallest angle into a histogram (smallest is most diagnostic).
+        Also build a log-distance-ratio histogram (scale-invariant shape info).
+
+    Input
+    -----
+    minutiae     : (N, 2) int   [y, x] coordinates.
+    n_nbrs       : int          nearest neighbours per minutia.
+    n_angle_bins : int          bins over [0, π/2] for the smallest angle.
+    n_ratio_bins : int          bins for log(long_side/short_side).
+
+    Output
+    ------
+    desc : (n_angle_bins + n_ratio_bins,) float64   L1-normalised.
+    """
+    n_out = n_angle_bins + n_ratio_bins
+    n = len(minutiae)
+    if n < 3:
+        return np.zeros(n_out, dtype=np.float64)
+
+    pts = minutiae[:, ::-1].astype(np.float64)   # (N, 2) as (x, y)
+    k_q = min(n_nbrs, n)
+    tree = KDTree(pts)
+    _, nbr_idx = tree.query(pts, k=k_q)           # (N, k_q)
+
+    angle_hist = np.zeros(n_angle_bins, dtype=np.float64)
+    ratio_hist = np.zeros(n_ratio_bins, dtype=np.float64)
+
+    for i in range(n):
+        nbrs = nbr_idx[i, 1:]          # exclude self
+        pi   = pts[i]
+        for m_idx in range(len(nbrs)):
+            for l_idx in range(m_idx + 1, len(nbrs)):
+                j, k = int(nbrs[m_idx]), int(nbrs[l_idx])
+                pj, pk = pts[j], pts[k]
+
+                dij = np.linalg.norm(pi - pj)
+                dik = np.linalg.norm(pi - pk)
+                djk = np.linalg.norm(pj - pk)
+                if dij < 1.0 or dik < 1.0 or djk < 1.0:
+                    continue
+
+                # Smallest internal angle (most discriminative; ranges in [0, π/3])
+                denom_i = 2.0 * dij * dik
+                cos_ai  = np.clip((dij**2 + dik**2 - djk**2) / (denom_i + 1e-9),
+                                  -1.0, 1.0)
+                denom_j = 2.0 * dij * djk
+                cos_aj  = np.clip((dij**2 + djk**2 - dik**2) / (denom_j + 1e-9),
+                                  -1.0, 1.0)
+                ai = np.arccos(cos_ai)
+                aj = np.arccos(cos_aj)
+                ak = max(0.0, np.pi - ai - aj)
+                min_angle = min(ai, aj, ak)
+
+                # Bin smallest angle into [0, π/2]
+                a_idx = int(min_angle / (np.pi / 2) * n_angle_bins)
+                angle_hist[min(a_idx, n_angle_bins - 1)] += 1.0
+
+                # Log distance ratio: log(max_side / min_side) ∈ [0, ~3]
+                sides = sorted([dij, dik, djk])
+                log_r = np.log1p(sides[2] / (sides[0] + 1e-9))
+                r_idx = int(log_r / 4.0 * n_ratio_bins)   # 4 ≈ log(e^4) = upper cap
+                ratio_hist[min(r_idx, n_ratio_bins - 1)] += 1.0
+
+    total = angle_hist.sum() + 1e-9
+    angle_hist /= total
+    ratio_hist /= (ratio_hist.sum() + 1e-9)
+    return np.concatenate([angle_hist, ratio_hist]).astype(np.float64)
+
+
+def compute_edge_orientation_histogram(edges: np.ndarray,
+                                        orientations: np.ndarray,
+                                        n_bins: int = 18) -> np.ndarray:
+    """
+    Build a histogram of RELATIVE orientations between connected minutia pairs.
+
+    WHY THIS WORKS: For an edge (i, j), the difference θ_i − θ_j encodes how
+    the ridge direction changes along the edge.  At a ridge meeting point the
+    two endpoints have similar orientations (Δθ ≈ 0); at a strong curve they
+    diverge.  This distribution is:
+      • rotation-invariant (uses differences, not absolute angles)
+      • subject-specific (ridge curvature patterns differ between individuals)
+      • stable across impressions (the ridge structure changes little)
+
+    Input
+    -----
+    edges        : (E, 2) int    graph edge list.
+    orientations : (N,) float64  ridge angles ∈ [0, π).
+    n_bins       : int
+
+    Output
+    ------
+    hist : (n_bins,) float64   L1-normalised histogram over [0, π/2].
+    """
+    if orientations is None or len(orientations) == 0 or len(edges) == 0:
+        return np.zeros(n_bins, dtype=np.float64)
+
+    n_pts  = len(orientations)
+    diffs  = []
+    for i, j in edges:
+        if i < n_pts and j < n_pts:
+            d = abs(orientations[i] - orientations[j]) % (np.pi / 2)
+            diffs.append(d)
+
+    if not diffs:
+        return np.zeros(n_bins, dtype=np.float64)
+
+    hist, _ = np.histogram(diffs, bins=n_bins, range=(0.0, np.pi / 2))
+    hist = hist.astype(np.float64) / (hist.sum() + 1e-9)
+    return hist
+
+
 def match_local_descriptors_score(descs1: np.ndarray,
                                    descs2: np.ndarray,
                                    ratio_thresh: float = 0.75) -> float:
@@ -1298,17 +1520,18 @@ def compute_global_laplacian_spectrum(edges: np.ndarray,
     return np.pad(eigs, (0, size - len(eigs))).astype(np.float64)
 
 
-def fingerprint_global_descriptor(node_descs:  np.ndarray,
-                                   edges:       np.ndarray = None,
-                                   n_nodes:     int        = 0,
-                                   weight_dict: dict       = None,
-                                   weights:     np.ndarray = None,
-                                   adjacency:   dict       = None,
-                                   gray:        np.ndarray = None,
-                                   mask:        np.ndarray = None,
-                                   minutiae:    np.ndarray = None,
-                                   H:           int        = 0,
-                                   W:           int        = 0) -> np.ndarray:
+def fingerprint_global_descriptor(node_descs:   np.ndarray,
+                                   edges:        np.ndarray = None,
+                                   n_nodes:      int        = 0,
+                                   weight_dict:  dict       = None,
+                                   weights:      np.ndarray = None,
+                                   adjacency:    dict       = None,
+                                   gray:         np.ndarray = None,
+                                   mask:         np.ndarray = None,
+                                   minutiae:     np.ndarray = None,
+                                   H:            int        = 0,
+                                   W:            int        = 0,
+                                   orientations: np.ndarray = None) -> np.ndarray:
     """
     Build a multi-component global fingerprint descriptor.
 
@@ -1430,10 +1653,7 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
         freq_feats = np.zeros(64)
     parts.append(freq_feats)
 
-    # ── 8. Rotation-invariant orientation histogram [v5 NEW] ─────────────────
-    # 24-bin histogram of ridge angles weighted by gradient energy.
-    # Fully rotation-invariant; discriminates fingerprint classes (arch/loop/whorl)
-    # and individual subjects via ridge curvature and core position.
+    # ── 8. Rotation-invariant orientation histogram [v5] ─────────────────────
     if gray is not None:
         orient_hist = compute_orientation_histogram(
             gray, mask if mask is not None else np.ones(gray.shape, dtype=bool),
@@ -1442,6 +1662,27 @@ def fingerprint_global_descriptor(node_descs:  np.ndarray,
     else:
         orient_hist = np.zeros(24)
     parts.append(orient_hist)
+
+    # ── 9. Minutiae triplet descriptor [v6 NEW] ──────────────────────────────
+    # 28D: histogram of triangle shapes formed by spatially-close minutiae.
+    # Invariant to rotation, translation, scale — core biometric invariant.
+    if minutiae is not None and len(minutiae) >= 3:
+        triplet_desc = compute_minutiae_triplet_descriptor(
+            minutiae, n_nbrs=5, n_angle_bins=18, n_ratio_bins=10
+        )
+    else:
+        triplet_desc = np.zeros(28)
+    parts.append(triplet_desc)
+
+    # ── 10. Edge orientation histogram [v6 NEW] ───────────────────────────────
+    # 18D: distribution of relative orientation differences along graph edges.
+    # Captures ridge curvature patterns — rotation-invariant and person-specific.
+    if edges is not None and orientations is not None and len(edges) > 0:
+        edge_ori_hist = compute_edge_orientation_histogram(edges, orientations,
+                                                           n_bins=18)
+    else:
+        edge_ori_hist = np.zeros(18)
+    parts.append(edge_ori_hist)
 
     return np.concatenate(parts).astype(np.float64)
 
@@ -1487,32 +1728,34 @@ def process_fingerprint(img_path: str) -> dict | None:
     weights, weight_dict = compute_ridge_weights(edges, minutiae, binary)
 
     # Phase 3
-    node_descs  = compute_all_node_descriptors(minutiae, adjacency, weight_dict)
-    # v3: pass image + mask + minutiae for orientation field, spatial density, ridge freq
+    orientations = prep.get("orientations")   # (N,) ridge angles, v6
+    node_descs   = compute_all_node_descriptors(minutiae, adjacency, weight_dict,
+                                                 orientations=orientations)
     H_img, W_img = prep["gray"].shape
     global_desc = fingerprint_global_descriptor(
         node_descs,
-        edges       = edges,
-        n_nodes     = len(minutiae),
-        weight_dict = weight_dict,
-        weights     = weights,
-        adjacency   = adjacency,
-        gray        = prep["gray"],
-        mask        = prep.get("mask"),
-        minutiae    = minutiae,
-        H           = H_img,
-        W           = W_img,
+        edges        = edges,
+        n_nodes      = len(minutiae),
+        weight_dict  = weight_dict,
+        weights      = weights,
+        adjacency    = adjacency,
+        gray         = prep["gray"],
+        mask         = prep.get("mask"),
+        minutiae     = minutiae,
+        H            = H_img,
+        W            = W_img,
+        orientations = orientations,
     )
 
     return {
-        "path"        : img_path,
-        "prep"        : prep,
-        "edges"       : edges,
-        "adjacency"   : adjacency,
-        "weights"     : weights,
-        "weight_dict" : weight_dict,
-        "node_descs"  : node_descs,
-        "global_desc" : global_desc,
+        "path"         : img_path,
+        "prep"         : prep,
+        "edges"        : edges,
+        "adjacency"    : adjacency,
+        "weights"      : weights,
+        "weight_dict"  : weight_dict,
+        "node_descs"   : node_descs,
+        "global_desc"  : global_desc,
     }
 
 
