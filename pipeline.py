@@ -2354,8 +2354,6 @@ def main():
     # ── Per-DB evaluation ─────────────────────────────────────────────────────
     all_summary = {}
 
-    vis_saved = False    # save visualisations only for the very first image
-
     for db_name, subject_map in sorted(dataset.items()):
 
         log.info(f"\n{'─'*60}")
@@ -2378,6 +2376,7 @@ def main():
 
         n_ok = 0
         n_fail = 0
+        vis_saved = False    # save visualisations for the first successful image per DB
 
         for subj_id, path in tqdm(all_paths, desc=db_name):
             res = process_fingerprint(path)
