@@ -52,7 +52,7 @@ fingerprint/
 ├── readme.md                # This file
 │
 ├── Datasets/
-│   └── FVC2004/             # (or FVC2002/) — fingerprint benchmark datasets
+│   └── PAMI Lab/             # (or FVC2004/) — fingerprint benchmark datasets
 │       ├── DB1_B/           # Database 1 — 10 subjects × 8 impressions = 80 images
 │       │   ├── 101_1.tif    # Naming: {subject}_{impression}.tif
 │       │   ├── 101_2.tif
@@ -65,20 +65,11 @@ fingerprint/
 │   └── trcsd/
 │       ├── pipeline.log     # Full run log with per-DB metrics
 │       └── sample_vis/      # Visualisation images saved during a run
-│           ├── DB1_B_phase1_1_preprocessing.png
-│           ├── DB1_B_phase1_2_delaunay.png
-│           ├── DB1_B_phase2_ridge_weights.png
-│           ├── DB1_B_phase3_spectral.png
-│           └── DB*_B_phase4_evaluation.png
-│
-└── debug/                   # Manual debug images (intermediate steps)
-    ├── 1_original.png
-    ├── 2_roi_mask.png
-    ├── 2_skeleton.png
-    ├── 3_delaunay.png
-    └── 4_delaunay.png
-```
-
+            ├── DB1_B_phase1_1_preprocessing.png
+            ├── DB1_B_phase1_2_delaunay.png
+            ├── DB1_B_phase2_ridge_weights.png
+            ├── DB1_B_phase3_spectral.png
+            └── DB*_B_phase4_evaluation.png
 ---
 
 ## Requirements & Installation
